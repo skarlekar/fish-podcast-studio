@@ -167,7 +167,9 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .episodes li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
 .episodes li.now { border-color: var(--amber); }
 .episodes .etitle { font: 600 1.02rem var(--serif); }
-.episodes .esub { grid-column: 1; color: var(--muted); font-size: 0.8rem; }
+.episodes .esub { grid-column: 1; color: var(--muted); font-size: 0.8rem; overflow-wrap: anywhere; }
+.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.danger.armed { color: var(--danger); border-color: var(--danger); background: transparent; }
 .episodes .eact { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 8px; }
 .episodes .eact button, .episodes .eact a { padding: 7px 12px; font-size: 0.82rem; }
 

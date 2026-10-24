@@ -5,7 +5,7 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 ## Layout
 - `server.js` — Node server: static files, Claude + Fish Audio proxy, key handling, range-served audio, episode library
 - `public/` — `index.html`, `styles.css`, `app.js` (the one-page app)
-- `test/smoke.js` — `npm test`; runs the real server against mock Claude/Fish upstreams (22 checks, all passing)
+- `test/smoke.js` — `npm test`; runs the real server against mock Claude/Fish upstreams (25 checks, all passing)
 - `start.sh` (npm start + open browser), `start-docker.sh` + `Dockerfile` (build, run container, open browser), `start-common.sh` (shared: busy-port prompt to stop + restart; stops a Docker-held port via `docker stop`, never by killing Docker's backend process)
 - `docs/` — README screenshots (`brief.png`, `player.png`); `LICENSE` — MIT
 - `output/` — generated .mp3 + .json (git-ignored)
@@ -19,6 +19,8 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 - Prompts: the system prompt (style, `DEFAULT_SYSTEM_PROMPT`) and user prompt (brief) are both editable in the UI. The server always appends `PROMPT_RULES` (length, tag syntax, output format, complete final sentence) after the style, so edits can't break parsing.
 - Claude call uses `max_tokens: 16000`: Sonnet 5.5 thinks by default and thinking counts against it (a 3000 cap truncated scripts mid-sentence). `stop_reason` `max_tokens`/`refusal` is an error, never a script.
 - Fish API credit is billed separately from a fish.audio web subscription; a 402 means no API credit. Audio errors show next to the Approve button.
+- Voices: default narrator `DEFAULT_VOICE_ID` = 785ee4188c594830bc2ec7065817c1e1 ("Narrator" by Rogen Darell Aban), override `FISH_VOICE_ID`. Fish `GET /model` searches titles only; `/api/voices` also takes a voice ID/fish.audio link in `q` (→ `GET /model/{id}`) and `author=<creator id>` (→ `author_id`). Episode footnotes show voice, creator and ID.
+- Delete: `POST /api/delete {file}` removes the .mp3 + .json (bare `*.mp3` names only); the UI uses a two-click confirm, no modal.
 - Docker: container listens on 0.0.0.0, published on host 127.0.0.1 only; runs as the host uid; `.env` and `output/` are bind-mounted (never in the image).
 
 ## Status
@@ -26,4 +28,4 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 - GitHub: PUBLIC repo https://github.com/skarlekar/fish-podcast-studio (MIT) (`origin`, tracking `main`). No `.env` or real keys tracked; `test/smoke.js` holds only fake `sk-ant-test-…` fixture keys.
 
 ## Ideas (not started)
-- Fixed default narrator voice for consistency across runs; progress for chunked synthesis.
+- Progress for chunked synthesis.

@@ -9,7 +9,9 @@ const assert = require('node:assert/strict');
 
 const CLAUDE_KEY = 'sk-ant-test-0123456789';
 const FISH_KEY = 'fish-test-0123456789';
-const calls = { claude: [], tts: [] };
+const calls = { claude: [], tts: [], model: [] };
+const VOICE_ID = '785ee4188c594830bc2ec7065817c1e1';
+const AUTHOR_ID = '9672b25f05dd4f7fa38257dea00ad01d';
 
 const SCRIPT = (n) =>
   'TITLE: The Road to the Sky\n\n' +
@@ -44,7 +46,13 @@ function mockUpstream() {
       }
       if (req.url.startsWith('/model')) {
         if (req.headers.authorization !== `Bearer ${FISH_KEY}`) return json(401, {});
-        return json(200, { total: 1, items: [{ _id: 'abcdef1234567890', title: 'Doc Narrator', description: 'Warm', tags: ['narration'], samples: [{ audio: 'https://example.com/s.mp3' }], author: { nickname: 'fish' } }] });
+        calls.model.push(req.url);
+        const one = req.url.match(/^\/model\/([0-9a-f]{32})$/);
+        if (one) {
+          if (one[1] !== VOICE_ID) return json(404, { message: 'not found' });
+          return json(200, { _id: VOICE_ID, title: 'Narrator', tags: ['male'], samples: [], author: { _id: AUTHOR_ID, nickname: 'Rogen Darell Aban' } });
+        }
+        return json(200, { total: 1, items: [{ _id: 'abcdef1234567890', title: 'Doc Narrator', description: 'Warm', tags: ['narration'], samples: [{ audio: 'https://example.com/s.mp3' }], author: { _id: AUTHOR_ID, nickname: 'fish' } }] });
       }
       json(404, {});
     });
@@ -93,6 +101,7 @@ async function check(name, fn) {
     assert.match(c.defaultSystemPrompt, /National Geographic/);
     assert.match(c.defaultSystemPrompt, /feel/i);
     assert.match(c.promptRules, /\{\{words\}\}/, 'rules template exposed for display');
+    assert.equal(c.defaultVoiceId, VOICE_ID, 'Rogen Darell Aban narrator is the default voice');
   });
   await check('refuses to call Claude without a key', async () => {
     assert.equal((await post('/api/narrative', { instructions: 'x' })).status, 401);
@@ -169,6 +178,23 @@ async function check(name, fn) {
     const v = await (await get('/api/voices?q=narrator')).json();
     assert.equal(v.items[0].title, 'Doc Narrator');
     assert.equal(v.items[0].sample, 'https://example.com/s.mp3');
+    assert.equal(v.items[0].authorId, AUTHOR_ID);
+  });
+  await check('voice lookup by ID or fish.audio link', async () => {
+    for (const q of [VOICE_ID, `https://fish.audio/m/${VOICE_ID}/`]) {
+      const v = await (await get(`/api/voices?q=${encodeURIComponent(q)}`)).json();
+      assert.equal(v.items.length, 1, q);
+      assert.equal(v.items[0].id, VOICE_ID);
+      assert.equal(v.items[0].author, 'Rogen Darell Aban');
+      assert.equal(calls.model.at(-1), `/model/${VOICE_ID}`);
+    }
+    const missing = await (await get(`/api/voices?q=${'0'.repeat(32)}`)).json();
+    assert.equal(missing.items.length, 0);
+  });
+  await check('voices by creator use author_id', async () => {
+    const r = await get(`/api/voices?author=${AUTHOR_ID}`);
+    assert.equal(r.status, 200);
+    assert.match(calls.model.at(-1), new RegExp(`author_id=${AUTHOR_ID}`));
   });
   await check('audio: default engine s2.1-pro-free, bracket tags kept, file saved', async () => {
     const r = await post('/api/audio', { title: episode.title, script: episode.script, engine: 's2.1-pro-free', voiceId: 'abcdef1234567890', voiceTitle: 'Doc Narrator', voiceAuthor: 'fish', speed: 1 });
@@ -226,8 +252,24 @@ async function check(name, fn) {
     assert.ok(episodes[0].script);
     assert.ok(episodes.some((e) => e.voiceAuthor === 'fish'), 'voice author kept in the library');
   });
+  await check('delete removes an episode (audio + record) and rejects bad names', async () => {
+    const r = await post('/api/audio', { title: 'To delete', script: 'x'.repeat(40), engine: 's2.1-pro-free' });
+    const a = await r.json();
+    const mp3 = path.join(tmp, 'output', a.file);
+    assert.ok(fs.existsSync(mp3));
+    const d = await post('/api/delete', { file: a.file });
+    assert.equal(d.status, 200, await d.clone().text());
+    assert.ok(!fs.existsSync(mp3) && !fs.existsSync(mp3.replace(/\.mp3$/, '.json')));
+    const { episodes } = await (await get('/api/episodes')).json();
+    assert.ok(!episodes.some((e) => e.file === a.file));
+    assert.equal((await post('/api/delete', { file: a.file })).status, 404);
+    assert.equal((await post('/api/delete', { file: '../server.js' })).status, 400);
+    assert.equal((await post('/api/delete', { file: a.file }, { Origin: 'http://evil.example.com' })).status, 403);
+  });
   await check('library and player credit the narrator voice and its author', async () => {
     const js = await (await get('/app.js')).text();
+    assert.match(js, /ID \$\{ep\.voiceId\}/, 'voice ID shown in the credit');
+    assert.match(js, /\/api\/delete/);
     assert.match(js, /voiceAuthor: state\.voice\.author/);
     assert.match(js, /function narratorCredit/);
     assert.ok((js.match(/narratorCredit\(ep\)/g) || []).length >= 2, 'used in both library and player');

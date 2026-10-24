@@ -23,6 +23,7 @@ Podcast Studio is a small, self-hosted web app. You describe a story; Claude wri
 - [Run with Docker](#run-with-docker)
 - [Configuration](#configuration)
 - [Prompts](#prompts)
+- [Voices](#voices)
 - [Audio engines](#audio-engines)
 - [Costs](#costs)
 - [Security and privacy](#security-and-privacy)
@@ -63,10 +64,10 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 | **Editable prompts** | Separate system prompt (voice and craft) and user prompt (the story), both editable in the page |
 | **Script review** | Edit the script, preview audio tags inline, ask Claude for revisions, or start over |
 | **Length control** | Pick 1–10 minutes; the app targets about 135 spoken words per minute and asks Claude to correct a draft that misses by more than 15% |
-| **Voices** | Search Fish Audio's voice library, play samples, and pick a narrator (credited on each episode) |
+| **Voices** | A default narrator is pre-selected; search Fish Audio's library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the voice, its creator and its ID |
 | **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
 | **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
-| **Library** | Every episode is saved to `output/` with its script and settings, and listed for replay |
+| **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
 
 ![The player and episode library](docs/player.png)
@@ -135,6 +136,7 @@ Keys and settings can go in `.env` (see [`.env.example`](.env.example)) or real 
 | `FISH_AUDIO_API_KEY` | — | Fish Audio API key (or enter it in the browser) |
 | `PORT` | `3000` | Port to listen on |
 | `FISH_MODEL` | `s2.1-pro-free` | Default audio engine in the picker |
+| `FISH_VOICE_ID` | `785ee418…c1e1` | Default narrator voice ("Narrator" by Rogen Darell Aban). Any 32-character Fish Audio voice ID |
 | `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for writing |
 | `OUTPUT_DIR` | `./output` | Where episodes are saved |
 | `HOST` | `127.0.0.1` | Bind address. Leave as is; Docker sets it inside the container only |
@@ -154,6 +156,18 @@ Both prompts are edited in the **Brief** panel.
 - **System prompt: how Claude writes.** The default asks for a National Geographic-style natural-history narrator: open in the middle of the sensation, observe like a naturalist, build tension, vary rhythm, stay factual, and end with a reflective close and a warm goodbye. Your edits are remembered in the browser; *Reset to default* restores the original.
 - **User prompt: the story.** What happened, where, and what the listener should feel. A white-knuckle drive up the Mount Washington Auto Road in peak fall foliage is pre-filled as an example.
 - **Fixed rules.** The app always adds the length target, tag syntax and output format after your system prompt. Expand *Always added after your system prompt* to see the exact text.
+
+## Voices
+
+Every episode starts with the **default narrator** selected: Fish Audio's "Narrator" voice by Rogen Darell Aban (ID `785ee4188c594830bc2ec7065817c1e1`). To use a different voice for an episode, pick another in the Production panel; to change the default, set `FISH_VOICE_ID` in `.env`.
+
+Fish Audio's voice search matches **voice titles only**, not creator names, and many voices share titles such as "Narrator". To find a specific voice:
+
+- **Paste its ID or link** into the search box, e.g. `785ee4188c594830bc2ec7065817c1e1` or `https://fish.audio/m/785ee4188c594830bc2ec7065817c1e1/`.
+- **Copy the ID from your library.** Each episode's footnote shows the voice, its creator and its ID.
+- **Browse by creator.** Click *More by* on any voice to list that creator's other voices.
+
+*Engine voice* uses no reference voice at all; the engine picks one, and it can change between runs.
 
 ## Audio engines
 
@@ -187,7 +201,8 @@ Podcast Studio itself is free; the two APIs it calls are billed by their provide
 | *Fish Audio won't voice this … (402)* | Your Fish Audio API credit is empty (a web subscription doesn't cover the API). Add credit, or use `s2.1-pro-free` |
 | *Claude ran out of room before finishing* | Rare with the current settings; click *Write the narrative* again or shorten the length |
 | *Docker is installed but not running* | Start Docker Desktop, then re-run `./start-docker.sh` |
-| The voice varies between runs | Pick a specific voice instead of *Default voice* |
+| The voice varies between runs | Pick a specific voice instead of *Engine voice* |
+| A voice can't be found by its creator's name | Fish search matches titles only. Paste the voice ID or fish.audio link, or use *More by* on one of the creator's voices |
 
 ## Development
 

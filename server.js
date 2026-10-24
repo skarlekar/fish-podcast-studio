@@ -58,6 +58,8 @@ const ENGINES = [
   { id: 's1', label: 'S1 (legacy)', tagStyle: 'parens' },
 ];
 const DEFAULT_ENGINE = ENGINES.some((e) => e.id === process.env.FISH_MODEL) ? process.env.FISH_MODEL : 's2.1-pro-free';
+// Default narrator: "Narrator" by Rogen Darell Aban on Fish Audio. Override with FISH_VOICE_ID (a 32-character voice ID).
+const DEFAULT_VOICE_ID = /^[0-9a-f]{32}$/i.test(process.env.FISH_VOICE_ID || '') ? process.env.FISH_VOICE_ID.toLowerCase() : '785ee4188c594830bc2ec7065817c1e1';
 
 function cleanKey(v) {
   v = String(v || '').trim();
@@ -372,7 +374,7 @@ async function handleAudio(body) {
     createdAt: new Date().toISOString(),
     engine: engineDef.id,
     voiceId: voiceId || null,
-    voiceTitle: String(body.voiceTitle || (voiceId ? 'Custom voice' : 'Default voice')).slice(0, 120),
+    voiceTitle: String(body.voiceTitle || (voiceId ? 'Custom voice' : 'Engine voice')).slice(0, 120),
     voiceAuthor: voiceId && body.voiceAuthor ? String(body.voiceAuthor).slice(0, 120) : null,
     speed,
     words: spokenWords(script),
@@ -384,29 +386,54 @@ async function handleAudio(body) {
   return { ...meta, url: `/audio/${encodeURIComponent(file)}`, savedTo: path.join('output', file) };
 }
 
-async function handleVoices(url) {
-  requireKey('fish');
-  const q = (url.searchParams.get('q') || '').trim().slice(0, 80);
-  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
-  const params = new URLSearchParams({ page_size: '12', page_number: String(page), sort_by: 'score', language: 'en' });
-  if (q) params.set('title', q);
-  const res = await fetch(`${FISH_BASE}/model?${params}`, {
-    headers: { Authorization: `Bearer ${keys.fish}` },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) {
-    if (res.status === 401) throw new HttpError(401, 'Fish Audio rejected the API key (401).');
-    throw new HttpError(502, `Could not load voices (${res.status}).`);
-  }
-  const data = await res.json();
-  const items = (data.items || []).map((m) => ({
+function voiceItem(m) {
+  return {
     id: m._id || m.id,
     title: m.title,
     description: String(m.description || '').slice(0, 200),
     tags: (m.tags || []).slice(0, 4),
     sample: m.samples?.[0]?.audio || null,
     author: m.author?.nickname || null,
-  }));
+    authorId: m.author?._id || null,
+  };
+}
+
+async function fishGet(pathAndQuery) {
+  const res = await fetch(`${FISH_BASE}${pathAndQuery}`, {
+    headers: { Authorization: `Bearer ${keys.fish}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    if (res.status === 401) throw new HttpError(401, 'Fish Audio rejected the API key (401).');
+    throw new HttpError(502, `Could not load voices (${res.status}).`);
+  }
+  return res.json();
+}
+
+/**
+ * Voice search. Fish Audio only matches voice titles, so also accept a voice ID or fish.audio link in `q`
+ * (direct lookup) and `author=<creator id>` (that creator's voices).
+ */
+async function handleVoices(url) {
+  requireKey('fish');
+  const q = (url.searchParams.get('q') || '').trim().slice(0, 200);
+  const author = (url.searchParams.get('author') || '').trim();
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+
+  const id = q.match(/(?:^|[^0-9a-f])([0-9a-f]{32})(?:[^0-9a-f]|$)/i)?.[1];
+  if (id) {
+    const m = await fishGet(`/model/${id.toLowerCase()}`);
+    const items = m ? [voiceItem(m)] : [];
+    return { total: items.length, page: 1, items };
+  }
+
+  const params = new URLSearchParams({ page_size: '12', page_number: String(page), sort_by: 'score' });
+  if (/^[0-9a-f]{32}$/i.test(author)) params.set('author_id', author);
+  else params.set('language', 'en');
+  if (q) params.set('title', q.slice(0, 80));
+  const data = (await fishGet(`/model?${params}`)) || {};
+  const items = (data.items || []).map(voiceItem);
   return { total: data.total ?? items.length, page, items };
 }
 
@@ -429,6 +456,20 @@ async function listEpisodes() {
     }
   }
   return out.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+async function handleDelete(body) {
+  const file = String(body.file || '');
+  // Same rule as serving audio: a bare .mp3 name inside OUTPUT_DIR, no paths.
+  if (!/^[A-Za-z0-9._-]+\.mp3$/.test(file) || file.startsWith('.')) throw new HttpError(400, 'Not a valid episode file name.');
+  const mp3 = path.join(OUTPUT_DIR, file);
+  try {
+    await fsp.unlink(mp3);
+  } catch {
+    throw new HttpError(404, 'That episode no longer exists.');
+  }
+  await fsp.unlink(mp3.replace(/\.mp3$/, '.json')).catch(() => {});
+  return { deleted: file };
 }
 
 // ---------------------------------------------------------------- keys
@@ -497,6 +538,7 @@ function configPayload() {
     claudeModel: CLAUDE_MODEL,
     defaultSystemPrompt: DEFAULT_SYSTEM_PROMPT,
     promptRules: PROMPT_RULES,
+    defaultVoiceId: DEFAULT_VOICE_ID,
   };
 }
 
@@ -629,6 +671,7 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/keys') return sendJson(res, 200, await handleKeys(body));
       if (p === '/api/narrative') return sendJson(res, 200, await handleNarrative(body));
       if (p === '/api/audio') return sendJson(res, 200, await handleAudio(body));
+      if (p === '/api/delete') return sendJson(res, 200, await handleDelete(body));
       return sendJson(res, 404, { error: 'Not found' });
     }
 

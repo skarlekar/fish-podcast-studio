@@ -18,7 +18,8 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   config: null,
   narrative: null, // { title, script }
-  voice: { id: '', title: 'Default voice', author: null },
+  voice: { id: '', title: 'Engine voice', author: null },
+  defaultVoice: null, // Fish voice details for config.defaultVoiceId, once looked up
   current: null, // episode now loaded in the player
   busy: false,
 };
@@ -146,6 +147,7 @@ $('#keysForm').addEventListener('submit', async (e) => {
     $('#fishKey').value = '';
     if (cfg.hasKeys.anthropic && cfg.hasKeys.fish) {
       keysDialog.close();
+      loadDefaultVoice();
       notice('Keys connected.', 'ok', 3000);
     } else {
       openKeys(false); // still missing the other one
@@ -232,7 +234,7 @@ async function writeNarrative({ feedback } = {}) {
     refreshStats();
     setStep('review');
     $('#reviewPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    if (!state.voicesLoaded) searchVoices('narrator', true);
+    if (!state.voicesLoaded) searchVoices('narrator', { quiet: true });
   } catch (ex) {
     notice(ex.message);
   } finally {
@@ -309,69 +311,115 @@ $('#engine').addEventListener('change', updateEngineHint);
 $('#speed').addEventListener('input', () => ($('#speedOut').textContent = `${Number($('#speed').value).toFixed(2)}×`));
 
 let sampleAudio = null;
-function renderVoices(items, showEmpty = true) {
+const voiceLabel = (v) => (v.author ? `${v.title} by ${v.author}` : v.title);
+
+function selectVoice(v) {
+  state.voice = { id: v.id, title: v.title, author: v.author || null };
+  $('#voiceCurrent').textContent = voiceLabel(state.voice);
+  $('#voiceList').querySelectorAll('li[data-id]').forEach((li) => li.classList.toggle('sel', li.dataset.id === state.voice.id));
+}
+
+/** The default narrator and the engine's own voice are always listed first, then the search results. */
+function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
   const ul = $('#voiceList');
   ul.replaceChildren();
 
-  const mk = (id, title, sub, sample, author) => {
+  const mk = (v, sub) => {
     const li = document.createElement('li');
-    li.className = state.voice.id === id ? 'sel' : '';
+    li.dataset.id = v.id;
+    li.className = state.voice.id === v.id ? 'sel' : '';
     const pick = document.createElement('button');
     pick.type = 'button';
     pick.className = 'vname';
-    pick.textContent = title;
+    pick.textContent = v.title;
     if (sub) {
       const s = document.createElement('span');
       s.className = 'vsub';
       s.textContent = sub;
       pick.append(s);
     }
-    pick.addEventListener('click', () => {
-      state.voice = { id, title, author };
-      $('#voiceCurrent').textContent = title;
-      ul.querySelectorAll('li').forEach((x) => x.classList.remove('sel'));
-      li.classList.add('sel');
-    });
+    pick.addEventListener('click', () => selectVoice(v));
     li.append(pick);
-    if (sample) {
+    if (v.sample) {
       const pl = document.createElement('button');
       pl.type = 'button';
       pl.className = 'ghost vplay';
       pl.textContent = '▶ Sample';
       pl.addEventListener('click', () => {
         sampleAudio?.pause();
-        sampleAudio = new Audio(sample);
+        sampleAudio = new Audio(v.sample);
         sampleAudio.play().catch(() => notice('Could not play that sample.'));
       });
       li.append(pl);
     }
+    if (v.authorId && v.author) {
+      // Fish Audio's search only matches voice titles, so browse a creator's voices by their ID instead.
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'ghost vplay';
+      more.textContent = 'More by';
+      more.title = `More voices by ${v.author}`;
+      more.addEventListener('click', () => searchVoices('', { author: v.authorId, authorName: v.author }));
+      li.append(more);
+    }
     return li;
   };
 
-  ul.append(mk('', 'Default voice', 'Let the engine choose — can vary between runs', null));
+  const id = state.config.defaultVoiceId;
+  const def = state.defaultVoice || (id ? { id, title: 'Default narrator', author: null } : null);
+  if (def) ul.append(mk(def, ['Default narrator', def.author].filter(Boolean).join(' · ')));
+  ul.append(mk({ id: '', title: 'Engine voice', author: null }, 'No reference voice: the engine picks one, and it can vary between runs'));
+  if (heading) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = heading;
+    ul.append(li);
+  }
   if (!items.length && showEmpty) {
     const li = document.createElement('li');
     li.className = 'empty';
-    li.textContent = 'No voices matched. Try another search.';
+    li.textContent = 'No voices matched. Search by voice title, or paste a voice ID or fish.audio voice link.';
     ul.append(li);
   }
-  for (const v of items) ul.append(mk(v.id, v.title, [v.author, ...(v.tags || [])].filter(Boolean).join(' · '), v.sample, v.author));
+  const others = items.filter((v) => !def || v.id !== def.id);
+  if (items.length && !others.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'That is the default narrator, listed first above.';
+    ul.append(li);
+  }
+  for (const v of others) ul.append(mk(v, [v.author, ...(v.tags || [])].filter(Boolean).join(' · ')));
 }
 
-async function searchVoices(q, quiet) {
-  if (!state.config.hasKeys.fish) return renderVoices([], false);
+async function searchVoices(q, { quiet = false, author = '', authorName = '' } = {}) {
+  if (!state.config.hasKeys.fish) return renderVoices([], { showEmpty: false });
   const btn = $('#voiceBtn');
   setBusy(btn, true, 'Searching…');
   try {
-    const r = await api(`/api/voices?q=${encodeURIComponent(q)}`);
+    const qs = author ? `author=${encodeURIComponent(author)}` : `q=${encodeURIComponent(q)}`;
+    const r = await api(`/api/voices?${qs}`);
     state.voicesLoaded = true;
-    renderVoices(r.items);
+    renderVoices(r.items, { heading: author ? `Voices by ${authorName}` : '' });
   } catch (ex) {
-    renderVoices([], !quiet);
+    renderVoices([], { showEmpty: !quiet });
     if (!quiet) notice(ex.message);
   } finally {
     setBusy(btn, false);
   }
+}
+
+/** Look up the default narrator's name (needs the Fish key); keep it selected unless another voice was picked. */
+async function loadDefaultVoice() {
+  const id = state.config.defaultVoiceId;
+  if (!id || !state.config.hasKeys.fish || state.defaultVoice) return;
+  try {
+    const r = await api(`/api/voices?q=${id}`);
+    if (r.items[0]) state.defaultVoice = r.items[0];
+  } catch {
+    /* keep the placeholder name */
+  }
+  if (state.voice.id === id && state.defaultVoice) selectVoice(state.defaultVoice);
+  renderVoices([], { showEmpty: false });
 }
 $('#voiceBtn').addEventListener('click', () => searchVoices($('#voiceQ').value.trim()));
 $('#voiceQ').addEventListener('keydown', (e) => e.key === 'Enter' && $('#voiceBtn').click());
@@ -428,10 +476,11 @@ const PLAY_PATH = 'M8 5v14l11-7z';
 const PAUSE_PATH = 'M6 5h4v14H6zM14 5h4v14h-4z';
 const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
 
-/** "Voice: Narrator by Rogen Darell Aban" — Fish voice titles are often generic, so credit the author too. */
+/** "Voice: Narrator by Rogen Darell Aban (ID 785e…)" — Fish voice titles are generic, so credit the author and ID too. */
 function narratorCredit(ep) {
   if (!ep.voiceTitle) return '';
-  return `Voice: ${ep.voiceTitle}${ep.voiceAuthor ? ` by ${ep.voiceAuthor}` : ''}`;
+  const who = `Voice: ${ep.voiceTitle}${ep.voiceAuthor ? ` by ${ep.voiceAuthor}` : ''}`;
+  return ep.voiceId ? `${who} (ID ${ep.voiceId})` : who;
 }
 
 function loadEpisode(ep, autoplay) {
@@ -504,6 +553,38 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ------------------------------------------------------------ library
+/** Two clicks: the first arms the button for a few seconds, the second deletes the audio and its record. */
+async function deleteEpisode(ep, btn) {
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Confirm delete';
+    btn.classList.add('armed');
+    setTimeout(() => {
+      if (btn.isConnected && btn.dataset.armed === '1') {
+        btn.dataset.armed = '';
+        btn.textContent = 'Delete';
+        btn.classList.remove('armed');
+      }
+    }, 4000);
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await api('/api/delete', { body: { file: ep.file } });
+    if (state.current && state.current.file === ep.file) {
+      audio.pause();
+      audio.removeAttribute('src');
+      state.current = null;
+      $('#playerPanel').hidden = true;
+    }
+    await refreshLibrary();
+    notice(`Deleted “${ep.title}”.`, 'ok', 4000);
+  } catch (ex) {
+    btn.disabled = false;
+    notice(ex.message);
+  }
+}
+
 async function refreshLibrary() {
   let eps = [];
   try {
@@ -541,7 +622,12 @@ async function refreshLibrary() {
     dl.textContent = 'Download';
     dl.href = `${ep.url}?download=1`;
     dl.setAttribute('download', ep.file);
-    act.append(play, dl);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'ghost danger';
+    del.textContent = 'Delete';
+    del.addEventListener('click', () => deleteEpisode(ep, del));
+    act.append(play, dl, del);
     li.append(t, s, act);
     ul.append(li);
   }
@@ -556,7 +642,10 @@ async function refreshLibrary() {
   }
   fillEngines();
   fillSystemPrompt();
-  renderVoices([], false);
+  const id = state.config.defaultVoiceId;
+  if (id) selectVoice({ id, title: 'Default narrator', author: null });
+  renderVoices([], { showEmpty: false });
+  loadDefaultVoice();
   await refreshLibrary();
   const has = state.config.hasKeys;
   if (!has.anthropic || !has.fish) openKeys(false);
