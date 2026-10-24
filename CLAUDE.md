@@ -17,12 +17,8 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 
 ## Status
 - Built and tested against mocks only. NO live Claude/Fish Audio call has been made yet (no keys were available in the build session).
-- One git commit exists locally on `main` (7a48ffb). This CLAUDE.md is uncommitted.
+- Pushed to private GitHub repo https://github.com/skarlekar/FishAudioTrial (`origin`, tracking `main`). No `.env` or real keys tracked; `test/smoke.js` holds only fake `sk-ant-test-…` fixture keys.
 
 ## PENDING (delete this section when done)
-1. Create the GitHub repo `FishAudioTrial` under the user's account (user said "in my github"; I proposed private, ask if unsure) and push `main`:
-   `gh repo create FishAudioTrial --private --source=. --remote=origin --push`
-   (commit CLAUDE.md first). The cloud session could not do this: no GitHub credentials.
-2. Confirm `git ls-files` contains no `.env` and no keys, and `gh repo view` shows the repo.
-3. Help the user put keys in `.env` (copy `.env.example`; `ANTHROPIC_API_KEY`, `FISH_AUDIO_API_KEY`), run `npm start`, open http://localhost:3000, and do the first LIVE run with the default Mount Washington brief. Fix anything that breaks against the real APIs (unverified: exact Fish response/streaming behavior, whether a ~5-min script works in one TTS request or needs the paragraph-chunk fallback, voice-search response fields, Anthropic /v1/models key check).
-4. Optional ideas: fixed default narrator voice for consistency across runs, progress for chunked synthesis.
+1. Help the user put keys in `.env` (copy `.env.example`; `ANTHROPIC_API_KEY`, `FISH_AUDIO_API_KEY`), run `npm start`, open http://localhost:3000, and do the first LIVE run with the default Mount Washington brief. Fix anything that breaks against the real APIs (unverified: exact Fish response/streaming behavior, whether a ~5-min script works in one TTS request or needs the paragraph-chunk fallback, voice-search response fields, Anthropic /v1/models key check).
+2. Optional ideas: fixed default narrator voice for consistency across runs, progress for chunked synthesis.
