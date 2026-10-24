@@ -6,7 +6,8 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 - `server.js` — Node server: static files, Claude + Fish Audio proxy, key handling, range-served audio, episode library
 - `public/` — `index.html`, `styles.css`, `app.js` (the one-page app)
 - `test/smoke.js` — `npm test`; runs the real server against mock Claude/Fish upstreams (22 checks, all passing)
-- `start.sh` (npm start + open browser), `start-docker.sh` + `Dockerfile` (build, run container, open browser)
+- `start.sh` (npm start + open browser), `start-docker.sh` + `Dockerfile` (build, run container, open browser), `start-common.sh` (shared: busy-port prompt to stop + restart; stops a Docker-held port via `docker stop`, never by killing Docker's backend process)
+- `docs/` — README screenshots (`brief.png`, `player.png`); `LICENSE` — MIT
 - `output/` — generated .mp3 + .json (git-ignored)
 
 ## Decisions already made (don't relitigate)
@@ -22,7 +23,7 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 
 ## Status
 - Live runs work against the real Claude and Fish Audio APIs (s2.1-pro-free and drama-3).
-- GitHub: private repo https://github.com/skarlekar/fish-podcast-studio (`origin`, tracking `main`). No `.env` or real keys tracked; `test/smoke.js` holds only fake `sk-ant-test-…` fixture keys.
+- GitHub: PUBLIC repo https://github.com/skarlekar/fish-podcast-studio (MIT) (`origin`, tracking `main`). No `.env` or real keys tracked; `test/smoke.js` holds only fake `sk-ant-test-…` fixture keys.
 
 ## Ideas (not started)
 - Fixed default narrator voice for consistency across runs; progress for chunked synthesis.

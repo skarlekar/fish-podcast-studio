@@ -1,84 +1,218 @@
 # Podcast Studio
 
-A one-page web app that turns an idea into a produced audio narrative:
+**Turn a story idea into a produced, documentary-style audio episode — written by Claude, voiced by Fish Audio, reviewed by you.**
 
-1. **Brief** — two editable prompts: the **system prompt** (how Claude writes — a National Geographic-style nature-documentary narrator by default) and the **user prompt** (the story — a dramatic drive up Mount Washington's Auto Road is pre-filled).
-2. **Claude writes it** — a nature-documentary-style voice-over, about 5 minutes long, with [Fish Audio expressive tags](https://docs.fish.audio/developer-guide/core-features/emotions) such as `[whispering]`, `[nervous]` and `[long-break]`.
-3. **You review** — edit the script, preview the tags, or ask Claude to revise it. Nothing is voiced until you approve.
-4. **Fish Audio voices it** — pick an audio engine (default `s2.1-pro-free`) and a voice.
-5. **Listen** — podcast-style player (seek, ±15/30 s, speed), transcript, download, and a library of past episodes. Every episode is also saved to `./output/`.
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Node.js 18+](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
+[![Dependencies: 0](https://img.shields.io/badge/dependencies-0-blue.svg)](package.json)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](#run-with-docker)
 
-## Run it
+![The brief: editable system and user prompts](docs/brief.png)
 
-Requires Node 18+. No `npm install` needed — there are zero dependencies.
+Podcast Studio is a small, self-hosted web app. You describe a story; Claude writes it as a National Geographic-style nature-documentary voice-over, complete with expressive delivery cues; you review and edit the script; Fish Audio performs it; and you listen in a podcast-style player, with every episode saved as an MP3.
 
-```bash
-cp .env.example .env     # optional — see below
-./start.sh               # runs npm start and opens http://localhost:3000 when it's ready
+---
+
+## Contents
+
+- [Why Podcast Studio](#why-podcast-studio)
+- [When to use it](#when-to-use-it)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Run with Docker](#run-with-docker)
+- [Configuration](#configuration)
+- [Prompts](#prompts)
+- [Audio engines](#audio-engines)
+- [Costs](#costs)
+- [Security and privacy](#security-and-privacy)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [License](#license)
+
+## Why Podcast Studio
+
+Writing narration and voicing it are different crafts, and most text-to-speech tools treat the script as an afterthought. Podcast Studio splits the job into the steps a real production would use:
+
+- **A writer that writes for the ear.** Claude drafts in a measured, cinematic documentary voice: sensory detail, rising tension, deliberate pauses, and a proper ending with a sign-off. The goal is a story the listener *feels*, not one that is merely read aloud.
+- **Performance cues built in.** The script carries [Fish Audio expressive tags](https://docs.fish.audio/developer-guide/core-features/emotions) such as `[low and tense]`, `[whispering]` and `[long-break]`, so the voice knows where to hush, tighten or pause.
+- **A human in the loop.** Nothing is voiced until you approve it. Edit the text, preview the tags, or ask Claude to revise. Text-to-speech credit is only spent on a script you are happy with.
+- **Local and lightweight.** One Node.js file with zero npm dependencies, running on your own machine. Your API keys never reach the browser, and your episodes stay in a local folder.
+
+## When to use it
+
+**A good fit for:**
+
+- Turning a personal experience (a hike, a drive, a trip) into a short narrated piece to share with friends and family
+- Drafting a pilot episode or a narrated segment before committing to a studio recording
+- Short educational or travel audio about a place, a natural phenomenon or a historical moment
+- Comparing Fish Audio engines and voices on the same script
+- Experimenting with narration prompts, and hearing the result within minutes
+
+**Not designed for:**
+
+- Multi-speaker shows, interviews or dialogue (one narrator per episode)
+- Music, sound effects or full audio mixing
+- High-volume, unattended batch production
+- Hosting for other people: the server is deliberately localhost-only and has no user accounts
+
+## Features
+
+| | |
+| --- | --- |
+| **Editable prompts** | Separate system prompt (voice and craft) and user prompt (the story), both editable in the page |
+| **Script review** | Edit the script, preview audio tags inline, ask Claude for revisions, or start over |
+| **Length control** | Pick 1–10 minutes; the app targets about 135 spoken words per minute and asks Claude to correct a draft that misses by more than 15% |
+| **Voices** | Search Fish Audio's voice library, play samples, and pick a narrator (credited on each episode) |
+| **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
+| **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
+| **Library** | Every episode is saved to `output/` with its script and settings, and listed for replay |
+| **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
+
+![The player and episode library](docs/player.png)
+
+## How it works
+
+```mermaid
+flowchart LR
+    U([You]) -->|system prompt + story| B[Browser<br/>one-page app]
+    B -->|/api/narrative| S[Local Node server<br/>server.js]
+    S -->|Messages API| C[Claude Sonnet]
+    C -->|script with audio tags| S
+    S --> B
+    U -->|edit, revise, approve| B
+    B -->|/api/audio| S
+    S -->|/v1/tts| F[Fish Audio]
+    F -->|MP3| S
+    S -->|saves .mp3 + .json| O[(output/)]
+    S -->|streams audio| B
 ```
 
-`npm start` works too (then open <http://localhost:3000> yourself). Use `PORT=3001 ./start.sh` for another port, or `OPEN_BROWSER=0` to skip the browser. Stop with Ctrl-C.
+1. **Brief.** You write or edit two prompts. The **system prompt** sets the voice; the default casts Claude as a nature-documentary writer. The **user prompt** is the story.
+2. **Write.** The server sends both to Claude Sonnet (`claude-sonnet-5-5`). It appends fixed rules after your system prompt: the word target for the chosen length, Fish Audio's tag syntax and a strict output format. That way an edited prompt can't break the steps that follow. If the draft is more than 15% off the target length, the server asks Claude for one corrected version. A reply that was cut off (`stop_reason: max_tokens`) is rejected rather than shown.
+3. **Review.** The script appears in an editor with a tag preview. Edit it directly, send feedback for a revision, or start over.
+4. **Voice.** On approval, the server sends the script to Fish Audio's text-to-speech API with your chosen engine, voice and speed. For the legacy `s1` engine, `[bracket]` tags are converted to its `(parenthesis)` set and unsupported ones are dropped. If a long script is rejected as one request, it is retried paragraph by paragraph and the audio joined.
+5. **Listen.** The MP3 and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
 
-### With Docker
+All calls to Claude and Fish Audio are made by the local server; the browser only talks to `localhost`.
+
+## Quick start
+
+**Prerequisites:** [Node.js 18+](https://nodejs.org/), an [Anthropic API key](https://console.anthropic.com/settings/keys) and a [Fish Audio API key](https://fish.audio/app/developers). No `npm install` needed.
 
 ```bash
-./start-docker.sh        # builds the image, (re)starts the container, opens http://localhost:3000
+git clone https://github.com/skarlekar/fish-podcast-studio.git
+cd fish-podcast-studio
+cp .env.example .env        # optional: add your keys here
+./start.sh                  # starts the server and opens http://localhost:3000
+```
+
+If you skip `.env`, the app asks for both keys in the browser when it opens. Keys entered there are kept in server memory only, unless you tick *Also save to a local .env*.
+
+`npm start` also works (then open <http://localhost:3000> yourself). Stop the server with Ctrl-C.
+
+**If the port is busy**, `./start.sh` shows what is using it and asks whether to stop it and restart. Answer *no* to leave it alone; if it is already Podcast Studio, the script opens it instead.
+
+## Run with Docker
+
+```bash
+./start-docker.sh           # builds the image, (re)starts the container, opens http://localhost:3000
 docker logs -f podcast-studio
 docker stop podcast-studio
 ```
 
-The image holds only the app. Your `.env` and `output/` are mounted from this folder, so keys and episodes stay on your machine and survive rebuilds. The container is published on `127.0.0.1` only. `PORT` and `OPEN_BROWSER` work as above. Don't run `./start.sh` and `./start-docker.sh` on the same port.
+- The image contains only the app (Node 22 Alpine). Your `.env` and `output/` are mounted from the project folder, so keys and episodes stay on your machine and survive rebuilds.
+- The container is published on `127.0.0.1` only, and runs as your user so files it writes stay yours.
+- Re-running the script rebuilds the image and replaces the container. Like `start.sh`, it asks before stopping anything else that holds the port.
+
+## Configuration
+
+Keys and settings can go in `.env` (see [`.env.example`](.env.example)) or real environment variables, which take precedence.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | — | Claude API key (or enter it in the browser) |
+| `FISH_AUDIO_API_KEY` | — | Fish Audio API key (or enter it in the browser) |
+| `PORT` | `3000` | Port to listen on |
+| `FISH_MODEL` | `s2.1-pro-free` | Default audio engine in the picker |
+| `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for writing |
+| `OUTPUT_DIR` | `./output` | Where episodes are saved |
+| `HOST` | `127.0.0.1` | Bind address. Leave as is; Docker sets it inside the container only |
+
+The start scripts also read:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPEN_BROWSER` | `1` | Set to `0` to skip opening the browser |
+| `FORCE` | `0` | Set to `1` to stop whatever holds the port without asking |
+| `IMAGE`, `CONTAINER_NAME` | `podcast-studio` | Docker image and container names (`start-docker.sh`) |
 
 ## Prompts
 
-The system prompt and the user prompt are both editable in the Brief panel. Your system prompt is remembered in the browser; *Reset to default* restores the National Geographic-style one. The app always appends fixed rules after it — the length target (from the Length slider), Fish Audio's tag syntax and the output format — so an edit can't break parsing or voicing. Expand *Always added after your system prompt* to see them.
+Both prompts are edited in the **Brief** panel.
 
-## API keys
-
-| Key | Used for | Get one |
-| --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Claude Sonnet writes the script | <https://console.anthropic.com/settings/keys> |
-| `FISH_AUDIO_API_KEY` | Fish Audio voices it | <https://fish.audio/go-api/> |
-
-Put them in `.env` **or** leave them out — if either is missing, the app asks for it in the browser when it launches. Keys entered in the browser are held in the server's memory only; tick *Also save to a local .env* if you want them remembered.
-
-### How keys are protected
-
-- `.env` and `output/` are in `.gitignore`; only `.env.example` (blank values) is committed.
-- All Claude and Fish Audio calls are made by the local Node server. Keys are never sent to the browser, and no endpoint returns them.
-- The server binds to `127.0.0.1`, rejects non-localhost `Host` headers and cross-origin POSTs, and redacts keys from any error text.
-- A saved `.env` is written with owner-only (`600`) permissions.
+- **System prompt: how Claude writes.** The default asks for a National Geographic-style natural-history narrator: open in the middle of the sensation, observe like a naturalist, build tension, vary rhythm, stay factual, and end with a reflective close and a warm goodbye. Your edits are remembered in the browser; *Reset to default* restores the original.
+- **User prompt: the story.** What happened, where, and what the listener should feel. A white-knuckle drive up the Mount Washington Auto Road in peak fall foliage is pre-filled as an example.
+- **Fixed rules.** The app always adds the length target, tag syntax and output format after your system prompt. Expand *Always added after your system prompt* to see the exact text.
 
 ## Audio engines
 
-Selectable in the Production panel. The default is `s2.1-pro-free`; set `FISH_MODEL` in `.env` to change it.
-
 | Engine | Notes |
 | --- | --- |
-| `s2.1-pro-free` | Same model as S2.1 Pro, free for testing (no latency guarantees) |
+| `s2.1-pro-free` | Same model as S2.1 Pro at no cost, for testing (no latency guarantees). Default |
 | `s2.1-pro` | Fish Audio's recommended production model |
 | `s2-pro` | Previous generation |
 | `drama-3` | Expressive drama model |
-| `s1` | Legacy, retires Dec 31 2026. Tags are auto-converted from `[brackets]` to `(parentheses)` and unsupported ones are dropped |
+| `s1` | Legacy, retiring December 31, 2026. Tags are converted automatically |
 
-Claude always uses Sonnet (`claude-sonnet-5-5`; override with `CLAUDE_MODEL`).
+## Costs
 
-## Test
+Podcast Studio itself is free; the two APIs it calls are billed by their providers.
+
+- **Claude:** one or two Sonnet requests per script (two if a length correction is needed). See [Anthropic pricing](https://www.anthropic.com/pricing).
+- **Fish Audio:** charged per generated audio from your **API credit**, except on the free-tier engine. API credit is separate from a fish.audio web subscription; top it up at <https://fish.audio/app/developers>.
+
+## Security and privacy
+
+- The server binds to `127.0.0.1`, rejects requests whose `Host` header isn't a loopback name (protecting against DNS rebinding), and rejects cross-origin `POST`s.
+- API keys are held by the server only. No endpoint returns them, and they are redacted from error messages.
+- A `.env` saved by the app is written with owner-only (`600`) permissions. `.env` and `output/` are git-ignored, and `.dockerignore` keeps them out of the Docker image.
+- Your prompts and scripts are sent to Anthropic, and approved scripts to Fish Audio, under their respective terms. Nothing else leaves your machine.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| *Port 3000 is already in use* | Let the start script stop the other process, or run on another port: `PORT=3001 ./start.sh` |
+| *Fish Audio won't voice this … (402)* | Your Fish Audio API credit is empty (a web subscription doesn't cover the API). Add credit, or use `s2.1-pro-free` |
+| *Claude ran out of room before finishing* | Rare with the current settings; click *Write the narrative* again or shorten the length |
+| *Docker is installed but not running* | Start Docker Desktop, then re-run `./start-docker.sh` |
+| The voice varies between runs | Pick a specific voice instead of *Default voice* |
+
+## Development
 
 ```bash
 npm test
 ```
 
-Runs the server against mock Claude and Fish Audio endpoints (no keys or network needed) and checks the full flow, range requests, key handling and origin protection.
-
-## Project layout
+The test suite starts the real server against mock Claude and Fish Audio endpoints (no keys or network needed). It covers the full write-review-voice flow, prompt handling, truncated replies, error messages, range requests, key handling, and Host and Origin protection.
 
 ```
-server.js        Node server: static files, Claude + Fish Audio proxy, key handling
-public/          index.html, styles.css, app.js (the one-page app)
-test/smoke.js    End-to-end test with mock upstreams
-start.sh         npm start + open the browser
-start-docker.sh  Build + run the Docker container + open the browser
-Dockerfile       Node 22 alpine image (no keys or audio inside)
-output/          Generated .mp3 + .json (git-ignored)
+server.js          Node server: static files, Claude + Fish Audio proxy, keys, audio streaming, library
+public/            index.html, styles.css, app.js (the one-page app)
+test/smoke.js      End-to-end tests with mock upstreams
+start.sh           Start with Node and open the browser
+start-docker.sh    Build and run the Docker container, then open the browser
+start-common.sh    Shared by both: busy-port prompt, readiness check, browser opening
+Dockerfile         Node 22 Alpine image (no keys or audio inside)
+docs/              Screenshots
+output/            Generated .mp3 + .json (git-ignored)
 ```
+
+Issues and pull requests are welcome. Please run `npm test` before submitting.
+
+## License
+
+[MIT](LICENSE) © 2026 skarlekar
+
+Podcast Studio is an independent project and is not affiliated with or endorsed by Anthropic, Fish Audio or National Geographic. "National Geographic-style" describes a narrative tone only.
