@@ -5,8 +5,9 @@ One-page web app. Claude (Sonnet, `claude-sonnet-5-5`) writes a Nat-Geo-style na
 ## Layout
 - `server.js` — Node server: static files, Claude + Fish Audio proxy, key handling, range-served audio, episode library
 - `public/` — `index.html`, `styles.css`, `app.js` (the one-page app)
-- `test/smoke.js` — `npm test`; runs the real server against mock Claude/Fish upstreams (36 checks, all passing)
+- `test/smoke.js` — `npm test`; runs the real server against mock Claude/Fish upstreams (38 checks, all passing)
 - `start.sh` (npm start + open browser), `start-docker.sh` + `Dockerfile` (build, run container, open browser), `start-common.sh` (shared: busy-port prompt to stop + restart; stops a Docker-held port via `docker stop`, never by killing Docker's backend process)
+- `samples/` — two finished episodes (mp3/json/txt/svg) copied into an empty `output/` on first start by `seedSamples()` (marker `output/.samples-added`; `SAMPLES_DIR` env for tests); included in the Docker image
 - `docs/` — README screenshots (`brief.png`, `player.png`); `LICENSE` — MIT
 - `output/` — generated .mp3 + .json (git-ignored)
 

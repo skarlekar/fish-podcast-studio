@@ -109,15 +109,24 @@ async function check(name, fn) {
   const port = 3900 + Math.floor(Math.random() * 90);
   const base = `http://127.0.0.1:${port}`;
   const envFile = path.join(tmp, '.env');
+  // A tiny sample library, standing in for samples/ (checked separately below).
+  const samplesDir = path.join(tmp, 'samples');
+  fs.mkdirSync(samplesDir);
+  fs.writeFileSync(path.join(samplesDir, 'sample-one.mp3'), Buffer.alloc(2000, 1));
+  fs.writeFileSync(path.join(samplesDir, 'sample-one.txt'), '[calm] A sample.');
+  fs.writeFileSync(path.join(samplesDir, 'sample-one.json'), JSON.stringify({ file: 'sample-one.mp3', title: 'Sample One', createdAt: '2026-01-01T00:00:00.000Z', engine: 's2.1-pro-free', transcript: 'sample-one.txt', script: '[calm] A sample.', coverOf: 'default', bytes: 2000 }));
 
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: {
-      PATH: process.env.PATH, PORT: String(port), OUTPUT_DIR: path.join(tmp, 'output'), ENV_FILE: envFile,
-      ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '',
-    },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  await new Promise((resolve, reject) => { child.stdout.on('data', (d) => /running at/.test(String(d)) && resolve()); child.on('exit', reject); });
+  const startServer = (p) => {
+    const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: {
+        PATH: process.env.PATH, PORT: String(p), OUTPUT_DIR: path.join(tmp, 'output'), ENV_FILE: envFile, SAMPLES_DIR: samplesDir,
+        ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '',
+      },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    return new Promise((resolve, reject) => { proc.stdout.on('data', (d) => /running at/.test(String(d)) && resolve(proc)); proc.on('exit', reject); });
+  };
+  const child = await startServer(port);
 
   const get = (p, h) => fetch(base + p, { headers: h });
   const post = (p, body, h = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', ...h }, body: JSON.stringify(body) });
@@ -138,6 +147,36 @@ async function check(name, fn) {
     assert.match(c.defaultSystemPrompt, /feel/i);
     assert.match(c.promptRules, /\{\{words\}\}/, 'rules template exposed for display');
     assert.equal(c.defaultVoiceId, SARAH_ID, 'Sarah (Fish Official) is the default voice');
+  });
+  await check('a fresh library starts with the sample episodes, copied once', async () => {
+    const { episodes } = await (await get('/api/episodes')).json();
+    const sample = episodes.find((e) => e.file === 'sample-one.mp3');
+    assert.ok(sample, 'sample listed');
+    assert.equal(sample.title, 'Sample One');
+    assert.ok(sample.transcriptUrl, 'sample transcript available');
+    assert.equal(sample.needsCover, false);
+    assert.ok(fs.existsSync(path.join(tmp, 'output', '.samples-added')), 'marker written');
+    // Deleted samples don't come back on the next start.
+    assert.equal((await post('/api/delete', { file: 'sample-one.mp3' })).status, 200);
+    const again = await startServer(port + 100);
+    const eps = (await (await fetch(`http://127.0.0.1:${port + 100}/api/episodes`)).json()).episodes;
+    again.kill();
+    assert.ok(!eps.some((e) => e.file === 'sample-one.mp3'));
+  });
+  await check('the repo samples are complete, tagged and free of local paths', async () => {
+    const dir = path.join(__dirname, '..', 'samples');
+    const metas = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+    assert.ok(metas.length >= 2);
+    for (const n of metas) {
+      const raw = fs.readFileSync(path.join(dir, n), 'utf8');
+      assert.ok(!/\/Users\/|\\Users\\|\/home\//.test(raw), `${n}: no local paths`);
+      const m = JSON.parse(raw);
+      const mp3 = fs.readFileSync(path.join(dir, m.file));
+      assert.equal(mp3.subarray(0, 3).toString('latin1'), 'ID3', `${m.file}: cover tag embedded`);
+      assert.equal(m.coverOf, m.art || 'default', `${n}: embedded cover matches`);
+      assert.ok(m.transcript && fs.existsSync(path.join(dir, m.transcript)), `${n}: transcript present`);
+      if (m.art) assert.ok(fs.existsSync(path.join(dir, m.art)), `${n}: illustration present`);
+    }
   });
   await check('refuses to call Claude without a key', async () => {
     assert.equal((await post('/api/narrative', { instructions: 'x' })).status, 401);

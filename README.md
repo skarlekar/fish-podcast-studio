@@ -111,6 +111,8 @@ cp .env.example .env        # optional: add your keys here
 ./start.sh                  # starts the server and opens http://localhost:3000
 ```
 
+Your library starts with two [sample episodes](samples/) — a skydive and the Mount Washington Auto Road — with their illustrations and transcripts, so you can try the player before making your own. They're copied in once, on the first start with an empty library; delete them like any other episode.
+
 If you skip `.env`, the app asks for both keys in the browser when it opens. Keys entered there are kept in server memory only, unless you tick *Also save to a local .env*.
 
 `npm start` also works (then open <http://localhost:3000> yourself). Stop the server with Ctrl-C.
@@ -226,6 +228,7 @@ start.sh           Start with Node and open the browser
 start-docker.sh    Build and run the Docker container, then open the browser
 start-common.sh    Shared by both: busy-port prompt, readiness check, browser opening
 Dockerfile         Node 22 Alpine image (no keys or audio inside)
+samples/           Two finished sample episodes, copied into an empty library on first start
 docs/              Screenshots
 output/            Per episode: .mp3, .svg cover, .txt audio transcript, .json record (git-ignored)
 ```
@@ -235,5 +238,7 @@ Issues and pull requests are welcome. Please run `npm test` before submitting.
 ## License
 
 [MIT](LICENSE) © 2026 skarlekar
+
+The sample episodes in [`samples/`](samples/) were generated with Claude and Fish Audio and are included for demonstration; their use is subject to Fish Audio's terms.
 
 Podcast Studio is an independent project and is not affiliated with or endorsed by Anthropic, Fish Audio or National Geographic. "National Geographic-style" describes a narrative tone only.

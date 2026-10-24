@@ -18,6 +18,7 @@ const path = require('node:path');
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const OUTPUT_DIR = process.env.OUTPUT_DIR ? path.resolve(process.env.OUTPUT_DIR) : path.join(ROOT, 'output');
+const SAMPLES_DIR = process.env.SAMPLES_DIR ? path.resolve(process.env.SAMPLES_DIR) : path.join(ROOT, 'samples');
 const ENV_PATH = process.env.ENV_FILE ? path.resolve(process.env.ENV_FILE) : path.join(ROOT, '.env');
 
 // ---------------------------------------------------------------- .env loading
@@ -634,6 +635,26 @@ async function listEpisodes() {
   return out.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
+/**
+ * A fresh library starts with the sample episodes from samples/. The marker file means it happens only once,
+ * so samples you delete stay deleted, and an existing library is never touched.
+ */
+function seedSamples() {
+  const marker = path.join(OUTPUT_DIR, '.samples-added');
+  try {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+    if (fs.existsSync(marker)) return;
+    const empty = !fs.readdirSync(OUTPUT_DIR).some((n) => n.endsWith('.json'));
+    const files = empty && fs.existsSync(SAMPLES_DIR) ? fs.readdirSync(SAMPLES_DIR).filter((n) => /^[A-Za-z0-9._-]+\.(mp3|json|svg|txt)$/.test(n)) : [];
+    for (const n of files) fs.copyFileSync(path.join(SAMPLES_DIR, n), path.join(OUTPUT_DIR, n));
+    fs.writeFileSync(marker, 'Sample episodes are offered once, to an empty library. Delete this file to offer them again.\n');
+    const count = files.filter((n) => n.endsWith('.json')).length;
+    if (count) console.log(`  Added ${count} sample episode${count === 1 ? '' : 's'} to your library.`);
+  } catch (err) {
+    console.warn(`  Could not add the sample episodes: ${err.message}`);
+  }
+}
+
 async function handleDelete(body) {
   const file = episodeFile(body.file);
   const mp3 = path.join(OUTPUT_DIR, file);
@@ -901,6 +922,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+seedSamples();
 server.listen(PORT, HOST, () => {
   const addr = server.address();
   const shown = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${addr.port}`;

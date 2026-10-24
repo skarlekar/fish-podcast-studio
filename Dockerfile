@@ -5,6 +5,8 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json server.js ./
 COPY public ./public
+# Sample episodes, copied into an empty library on first start.
+COPY samples ./samples
 
 # Listen on all interfaces inside the container; start-docker.sh publishes the port on the host's 127.0.0.1 only.
 ENV NODE_ENV=production \
