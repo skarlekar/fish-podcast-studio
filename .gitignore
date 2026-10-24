@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated audio and episode metadata
+output/
+
+# Node / OS / editor
+node_modules/
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.log

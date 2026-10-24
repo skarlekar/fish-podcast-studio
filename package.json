@@ -1,0 +1,15 @@
+{
+  "name": "podcast-studio",
+  "version": "1.0.0",
+  "description": "Podcast Studio — Claude writes a dramatic nature-documentary narrative, Fish Audio voices it, and you play it in a podcast-style player.",
+  "main": "server.js",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.js"
+  }
+}
