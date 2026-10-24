@@ -153,6 +153,10 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .scrub input::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--text); border: 2px solid var(--amber); cursor: pointer; }
 .scrub input::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--text); border: 2px solid var(--amber); cursor: pointer; }
 .saved { font-size: 0.8rem; color: var(--muted); }
+.small { padding: 4px 10px; font-size: 0.8rem; }
+.rules { margin-top: 8px; }
+.rules summary { cursor: pointer; color: var(--muted); font-size: 0.8rem; }
+.rules pre { margin: 8px 0 0; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font: 0.78rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-height: 260px; overflow: auto; }
 .transcript { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }
 .transcript summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
 #transcript { font-family: var(--serif); line-height: 1.75; color: #d6d1c7; max-height: 320px; overflow: auto; margin-top: 10px; padding-right: 8px; }

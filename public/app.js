@@ -1,6 +1,6 @@
 'use strict';
 
-const DEFAULT_BRIEF = `Write in the voice of a nature-documentary narrator. The subject: a white-knuckle drive up the Mount Washington Auto Road in New Hampshire, in the middle of peak fall foliage.
+const DEFAULT_BRIEF = `A white-knuckle drive up the Mount Washington Auto Road in New Hampshire, in the middle of peak fall foliage.
 
 The road climbs about 7.6 miles to the 6,288-foot summit — steep, winding, with tight hairpins, sheer drop-offs, and on the upper stretches barely a divider or low fence between the car and open air. For the person in the car it was one of the scariest drives of their life.
 
@@ -18,7 +18,7 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   config: null,
   narrative: null, // { title, script }
-  voice: { id: '', title: 'Default voice' },
+  voice: { id: '', title: 'Default voice', author: null },
   current: null, // episode now loaded in the player
   busy: false,
 };
@@ -160,7 +160,45 @@ $('#keysForm').addEventListener('submit', async (e) => {
 
 // ------------------------------------------------------------ brief → narrative
 $('#instructions').value = DEFAULT_BRIEF;
-$('#minutes').addEventListener('input', () => ($('#minutesOut').textContent = `${$('#minutes').value} min`));
+$('#minutes').addEventListener('input', () => {
+  $('#minutesOut').textContent = `${$('#minutes').value} min`;
+  renderRules();
+});
+
+// The system prompt is editable and remembered in this browser; the server appends fixed rules, previewed here.
+const SYSTEM_KEY = 'podcastStudio.systemPrompt';
+function fillSystemPrompt() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(SYSTEM_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  $('#systemPrompt').value = saved || state.config.defaultSystemPrompt;
+  renderRules();
+}
+function renderRules() {
+  if (!state.config) return;
+  const minutes = Number($('#minutes').value);
+  $('#promptRules').textContent = state.config.promptRules
+    .replaceAll('{{words}}', String(Math.round(minutes * 135)))
+    .replaceAll('{{minutes}}', String(minutes));
+}
+$('#systemPrompt').addEventListener('input', () => {
+  try {
+    localStorage.setItem(SYSTEM_KEY, $('#systemPrompt').value);
+  } catch {
+    /* storage unavailable */
+  }
+});
+$('#resetSystemBtn').addEventListener('click', () => {
+  $('#systemPrompt').value = state.config.defaultSystemPrompt;
+  try {
+    localStorage.removeItem(SYSTEM_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+});
 
 function ensureKey(which) {
   if (!state.config.hasKeys[which]) {
@@ -173,8 +211,12 @@ function ensureKey(which) {
 async function writeNarrative({ feedback } = {}) {
   if (!ensureKey('anthropic')) return;
   const btn = feedback ? $('#reviseBtn') : $('#writeBtn');
-  const body = { instructions: $('#instructions').value.trim(), minutes: Number($('#minutes').value) };
-  if (!body.instructions) return notice('Write a brief first.');
+  const body = {
+    system: $('#systemPrompt').value.trim(),
+    instructions: $('#instructions').value.trim(),
+    minutes: Number($('#minutes').value),
+  };
+  if (!body.instructions) return notice('Write a user prompt first: what the story is about.');
   if (feedback) body.feedback = feedback, (body.previous = { title: $('#title').value, script: $('#script').value });
   notice('');
   setBusy(btn, true, feedback ? 'Revising…' : 'Writing… (up to a minute)');
@@ -271,7 +313,7 @@ function renderVoices(items, showEmpty = true) {
   const ul = $('#voiceList');
   ul.replaceChildren();
 
-  const mk = (id, title, sub, sample) => {
+  const mk = (id, title, sub, sample, author) => {
     const li = document.createElement('li');
     li.className = state.voice.id === id ? 'sel' : '';
     const pick = document.createElement('button');
@@ -285,7 +327,7 @@ function renderVoices(items, showEmpty = true) {
       pick.append(s);
     }
     pick.addEventListener('click', () => {
-      state.voice = { id, title };
+      state.voice = { id, title, author };
       $('#voiceCurrent').textContent = title;
       ul.querySelectorAll('li').forEach((x) => x.classList.remove('sel'));
       li.classList.add('sel');
@@ -313,7 +355,7 @@ function renderVoices(items, showEmpty = true) {
     li.textContent = 'No voices matched. Try another search.';
     ul.append(li);
   }
-  for (const v of items) ul.append(mk(v.id, v.title, [v.author, ...(v.tags || [])].filter(Boolean).join(' · '), v.sample));
+  for (const v of items) ul.append(mk(v.id, v.title, [v.author, ...(v.tags || [])].filter(Boolean).join(' · '), v.sample, v.author));
 }
 
 async function searchVoices(q, quiet) {
@@ -342,7 +384,9 @@ $('#approveBtn').addEventListener('click', async () => {
   if (!script) return notice('The script is empty.');
   const btn = $('#approveBtn');
   const started = Date.now();
+  const errEl = $('#audioError');
   notice('');
+  errEl.hidden = true;
   setBusy(btn, true, 'Producing audio…');
   $('#progress').hidden = false;
   setStep('produce');
@@ -358,6 +402,7 @@ $('#approveBtn').addEventListener('click', async () => {
         engine: $('#engine').value,
         voiceId: state.voice.id,
         voiceTitle: state.voice.title,
+        voiceAuthor: state.voice.author,
         speed: Number($('#speed').value),
       },
     });
@@ -366,6 +411,9 @@ $('#approveBtn').addEventListener('click', async () => {
     notice('Audio ready — and saved to your output folder.', 'ok', 5000);
   } catch (ex) {
     setStep('review');
+    // The top-of-page notice is usually scrolled out of view here, so also show the reason by the button.
+    errEl.textContent = `Audio not produced: ${ex.message}`;
+    errEl.hidden = false;
     notice(ex.message);
   } finally {
     clearInterval(progressTimer);
@@ -380,12 +428,18 @@ const PLAY_PATH = 'M8 5v14l11-7z';
 const PAUSE_PATH = 'M6 5h4v14H6zM14 5h4v14h-4z';
 const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
 
+/** "Voice: Narrator by Rogen Darell Aban" — Fish voice titles are often generic, so credit the author too. */
+function narratorCredit(ep) {
+  if (!ep.voiceTitle) return '';
+  return `Voice: ${ep.voiceTitle}${ep.voiceAuthor ? ` by ${ep.voiceAuthor}` : ''}`;
+}
+
 function loadEpisode(ep, autoplay) {
   state.current = ep;
   $('#playerPanel').hidden = false;
   $('#playerH').textContent = ep.title;
   const when = ep.createdAt ? new Date(ep.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
-  $('#playerMeta').textContent = [when, `Engine ${ep.engine}`, ep.voiceTitle, `${ep.words} words`].filter(Boolean).join(' · ');
+  $('#playerMeta').textContent = [when, `Engine ${ep.engine}`, narratorCredit(ep), `${ep.words} words`].filter(Boolean).join(' · ');
   audio.src = ep.url;
   audio.playbackRate = RATES[0];
   $('#rate').textContent = '1×';
@@ -469,7 +523,12 @@ async function refreshLibrary() {
     t.textContent = ep.title;
     const s = document.createElement('div');
     s.className = 'esub';
-    s.textContent = `${new Date(ep.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} · ${ep.engine} · ${ep.voiceTitle} · ${(ep.bytes / 1048576).toFixed(1)} MB`;
+    s.textContent = [
+      new Date(ep.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }),
+      ep.engine,
+      narratorCredit(ep),
+      `${(ep.bytes / 1048576).toFixed(1)} MB`,
+    ].filter(Boolean).join(' · ');
     const act = document.createElement('div');
     act.className = 'eact';
     const play = document.createElement('button');
@@ -496,6 +555,7 @@ async function refreshLibrary() {
     return notice(ex.message);
   }
   fillEngines();
+  fillSystemPrompt();
   renderVoices([], false);
   await refreshLibrary();
   const has = state.config.hasKeys;

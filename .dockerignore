@@ -1,0 +1,16 @@
+# Secrets and generated audio stay on the host (mounted at run time), never in the image.
+.env
+.env.*
+*.pem
+*.key
+output/
+
+.git/
+node_modules/
+test/
+*.md
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+start*.sh

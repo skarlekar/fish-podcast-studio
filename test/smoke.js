@@ -26,15 +26,19 @@ function mockUpstream() {
         if (req.headers['x-api-key'] !== CLAUDE_KEY) return json(401, { error: { message: 'invalid x-api-key' } });
         const parsed = JSON.parse(body);
         calls.claude.push(parsed);
+        // A brief containing CUTOFF simulates Claude hitting max_tokens mid-sentence.
+        if (/CUTOFF/.test(parsed.messages[0].content)) {
+          return json(200, { stop_reason: 'max_tokens', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'TITLE: Cut\n\n[soft tone] I st' }] });
+        }
         // First answer is far too short to force the length-correction pass.
         const text = calls.claude.length === 1 ? SCRIPT(3) : SCRIPT(40);
-        return json(200, { content: [{ type: 'text', text }] });
+        return json(200, { stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text }] });
       }
       if (req.url === '/v1/tts') {
         if (req.headers.authorization !== `Bearer ${FISH_KEY}`) return json(401, { message: 'unauthorized' });
         const parsed = JSON.parse(body);
         calls.tts.push({ model: req.headers.model, body: parsed });
-        if (req.headers.model === 'drama-3') return json(402, { message: 'payment required' });
+        if (req.headers.model === 'drama-3') return json(402, { status: 402, message: 'Insufficient API credit. API credit is managed independently from platform credit. Please visit https://fish.audio/app/developers to view your API credit balance or add funds.' });
         res.writeHead(200, { 'content-type': 'audio/mpeg' });
         return res.end(Buffer.concat([Buffer.from('ID3'), Buffer.alloc(5000, 7)]));
       }
@@ -86,6 +90,9 @@ async function check(name, fn) {
     assert.deepEqual(c.hasKeys, { anthropic: false, fish: false });
     assert.equal(c.defaultEngine, 's2.1-pro-free');
     assert.ok(c.engines.length >= 4);
+    assert.match(c.defaultSystemPrompt, /National Geographic/);
+    assert.match(c.defaultSystemPrompt, /feel/i);
+    assert.match(c.promptRules, /\{\{words\}\}/, 'rules template exposed for display');
   });
   await check('refuses to call Claude without a key', async () => {
     assert.equal((await post('/api/narrative', { instructions: 'x' })).status, 401);
@@ -116,7 +123,40 @@ async function check(name, fn) {
     assert.equal(calls.claude[0].model, 'claude-sonnet-5-5');
     assert.match(calls.claude[0].system, /675 spoken words/);
     assert.match(calls.claude[0].system, /\[long-break\]/);
+    assert.match(calls.claude[0].system, /goodbye/i, 'prompt asks for a sign-off');
+    assert.match(calls.claude[0].system, /final sentence/i, 'prompt asks for a complete ending');
+    assert.ok(calls.claude[0].max_tokens >= 16000, 'room for adaptive thinking plus the script');
     episode = n;
+  });
+  await check('an edited system prompt replaces the default; the fixed rules are still appended', async () => {
+    calls.claude.length = 0;
+    const r = await post('/api/narrative', { system: 'CUSTOM STYLE: write like a ship captain.', instructions: 'A storm at sea', minutes: 5 });
+    assert.equal(r.status, 200);
+    const sys = calls.claude[0].system;
+    assert.ok(sys.startsWith('CUSTOM STYLE: write like a ship captain.'));
+    assert.ok(!/National Geographic/.test(sys), 'default style not mixed in');
+    assert.match(sys, /675 spoken words/);
+    assert.match(sys, /OUTPUT FORMAT/);
+    assert.match(sys, /final sentence/i);
+  });
+  await check('a blank system prompt falls back to the default', async () => {
+    calls.claude.length = 0;
+    await post('/api/narrative', { system: '   ', instructions: 'A storm at sea', minutes: 5 });
+    assert.match(calls.claude[0].system, /National Geographic/);
+  });
+  await check('the page shows both prompts and sends the system prompt', async () => {
+    const html = await (await get('/')).text();
+    assert.match(html, /id="systemPrompt"[\s\S]*id="instructions"/);
+    assert.match(html, /id="promptRules"/);
+    assert.match(await (await get('/app.js')).text(), /system: \$\('#systemPrompt'\)/);
+  });
+  await check('a script cut off at max_tokens is rejected, never returned', async () => {
+    calls.claude.length = 0;
+    const r = await post('/api/narrative', { instructions: 'CUTOFF brief', minutes: 5 });
+    const j = await r.json();
+    assert.equal(r.status, 502);
+    assert.match(j.error, /ran out of room|cut off/i);
+    assert.ok(!j.script);
   });
   await check('revision sends the previous script and feedback', async () => {
     calls.claude.length = 0;
@@ -131,9 +171,11 @@ async function check(name, fn) {
     assert.equal(v.items[0].sample, 'https://example.com/s.mp3');
   });
   await check('audio: default engine s2.1-pro-free, bracket tags kept, file saved', async () => {
-    const r = await post('/api/audio', { title: episode.title, script: episode.script, engine: 's2.1-pro-free', voiceId: 'abcdef1234567890', speed: 1 });
+    const r = await post('/api/audio', { title: episode.title, script: episode.script, engine: 's2.1-pro-free', voiceId: 'abcdef1234567890', voiceTitle: 'Doc Narrator', voiceAuthor: 'fish', speed: 1 });
     const a = await r.json();
     assert.equal(r.status, 200, JSON.stringify(a));
+    assert.equal(a.voiceTitle, 'Doc Narrator');
+    assert.equal(a.voiceAuthor, 'fish');
     const t = calls.tts.at(-1);
     assert.equal(t.model, 's2.1-pro-free');
     assert.equal(t.body.reference_id, 'abcdef1234567890');
@@ -150,10 +192,19 @@ async function check(name, fn) {
     assert.match(t.body.text, /\(nervous\) Hello there friend\. \(long-break\) Again\./);
     assert.ok(!t.body.text.includes('['));
   });
-  await check('audio: upstream 402 becomes a friendly error', async () => {
+  await check('audio: upstream 402 explains API credit, names the engine, offers the free tier', async () => {
     const r = await post('/api/audio', { title: 't', script: 'x'.repeat(40), engine: 'drama-3' });
     assert.equal(r.status, 402);
-    assert.match((await r.json()).error, /free tier/i);
+    const { error } = await r.json();
+    assert.match(error, /Drama 3/);
+    assert.match(error, /API credit/);
+    assert.match(error, /https:\/\/fish\.audio\/app\/developers/);
+    assert.match(error, /free tier/i);
+  });
+  await check('audio errors are shown next to the Approve button, not only at the top', async () => {
+    const html = await (await get('/')).text();
+    assert.match(html, /id="approveBtn"[\s\S]*id="audioError"/);
+    assert.match(await (await get('/app.js')).text(), /#audioError/);
   });
   await check('audio serving: full, range, suffix-range, download, traversal blocked', async () => {
     const full = await get(episode.url);
@@ -173,6 +224,13 @@ async function check(name, fn) {
     const { episodes } = await (await get('/api/episodes')).json();
     assert.ok(episodes.length >= 2);
     assert.ok(episodes[0].script);
+    assert.ok(episodes.some((e) => e.voiceAuthor === 'fish'), 'voice author kept in the library');
+  });
+  await check('library and player credit the narrator voice and its author', async () => {
+    const js = await (await get('/app.js')).text();
+    assert.match(js, /voiceAuthor: state\.voice\.author/);
+    assert.match(js, /function narratorCredit/);
+    assert.ok((js.match(/narratorCredit\(ep\)/g) || []).length >= 2, 'used in both library and player');
   });
   await check('blocks foreign Host headers and cross-origin POSTs', async () => {
     const rebinding = await new Promise((resolve) => {

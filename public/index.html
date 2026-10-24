@@ -31,9 +31,18 @@
       <div class="panel-head">
         <p class="eyebrow">Step 1</p>
         <h2 id="briefH">The brief</h2>
-        <p class="lede">Tell Claude what the story is. It writes a dramatic, nature-documentary voice-over with expressive audio tags, and nothing is voiced until you approve it.</p>
+        <p class="lede">Two prompts drive Claude. The system prompt sets the voice and craft; the user prompt is the story. Edit either one. Nothing is voiced until you approve the script.</p>
       </div>
-      <label class="field" for="instructions">What should the narrative be about?</label>
+      <div class="field-row">
+        <label class="field" for="systemPrompt">System prompt: how Claude writes</label>
+        <button id="resetSystemBtn" class="ghost small" type="button" title="Restore the National Geographic-style default">Reset to default</button>
+      </div>
+      <textarea id="systemPrompt" rows="12" spellcheck="true"></textarea>
+      <details class="rules">
+        <summary>Always added after your system prompt: length, audio tags, output format</summary>
+        <pre id="promptRules"></pre>
+      </details>
+      <label class="field" for="instructions">User prompt: what the story is about</label>
       <textarea id="instructions" rows="9" spellcheck="true"></textarea>
       <div class="row between wrap">
         <label class="inline" for="minutes">
@@ -99,6 +108,7 @@
             <div class="bar"><i></i></div>
             <p id="progressText">Fish Audio is voicing your story…</p>
           </div>
+          <p id="audioError" class="error" role="alert" hidden></p>
         </aside>
       </div>
     </section>

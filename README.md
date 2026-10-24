@@ -2,7 +2,7 @@
 
 A one-page web app that turns an idea into a produced audio narrative:
 
-1. **Brief** — describe the story (a dramatic drive up Mount Washington's Auto Road is pre-filled).
+1. **Brief** — two editable prompts: the **system prompt** (how Claude writes — a National Geographic-style nature-documentary narrator by default) and the **user prompt** (the story — a dramatic drive up Mount Washington's Auto Road is pre-filled).
 2. **Claude writes it** — a nature-documentary-style voice-over, about 5 minutes long, with [Fish Audio expressive tags](https://docs.fish.audio/developer-guide/core-features/emotions) such as `[whispering]`, `[nervous]` and `[long-break]`.
 3. **You review** — edit the script, preview the tags, or ask Claude to revise it. Nothing is voiced until you approve.
 4. **Fish Audio voices it** — pick an audio engine (default `s2.1-pro-free`) and a voice.
@@ -14,10 +14,24 @@ Requires Node 18+. No `npm install` needed — there are zero dependencies.
 
 ```bash
 cp .env.example .env     # optional — see below
-npm start
+./start.sh               # runs npm start and opens http://localhost:3000 when it's ready
 ```
 
-Open <http://localhost:3000>.
+`npm start` works too (then open <http://localhost:3000> yourself). Use `PORT=3001 ./start.sh` for another port, or `OPEN_BROWSER=0` to skip the browser. Stop with Ctrl-C.
+
+### With Docker
+
+```bash
+./start-docker.sh        # builds the image, (re)starts the container, opens http://localhost:3000
+docker logs -f podcast-studio
+docker stop podcast-studio
+```
+
+The image holds only the app. Your `.env` and `output/` are mounted from this folder, so keys and episodes stay on your machine and survive rebuilds. The container is published on `127.0.0.1` only. `PORT` and `OPEN_BROWSER` work as above. Don't run `./start.sh` and `./start-docker.sh` on the same port.
+
+## Prompts
+
+The system prompt and the user prompt are both editable in the Brief panel. Your system prompt is remembered in the browser; *Reset to default* restores the National Geographic-style one. The app always appends fixed rules after it — the length target (from the Length slider), Fish Audio's tag syntax and the output format — so an edit can't break parsing or voicing. Expand *Always added after your system prompt* to see them.
 
 ## API keys
 
@@ -63,5 +77,8 @@ Runs the server against mock Claude and Fish Audio endpoints (no keys or network
 server.js        Node server: static files, Claude + Fish Audio proxy, key handling
 public/          index.html, styles.css, app.js (the one-page app)
 test/smoke.js    End-to-end test with mock upstreams
+start.sh         npm start + open the browser
+start-docker.sh  Build + run the Docker container + open the browser
+Dockerfile       Node 22 alpine image (no keys or audio inside)
 output/          Generated .mp3 + .json (git-ignored)
 ```

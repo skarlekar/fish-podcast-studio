@@ -87,33 +87,42 @@ class HttpError extends Error {
 }
 
 // ---------------------------------------------------------------- narrative (Claude)
-function buildSystemPrompt(minutes) {
-  const target = Math.round(minutes * 135);
-  return `You are the writer-narrator of a prestige natural-history audio documentary in the grand, hushed tradition of the great nature-documentary voices. You write voice-over scripts that are about to be performed by a text-to-speech model with expressive audio tags.
+// The system prompt has two parts: an editable style (shown in the app, this is the default) and fixed rules
+// the app always appends, so an edited style can't break title parsing or the Fish Audio tag syntax.
+const DEFAULT_SYSTEM_PROMPT = `You are the writer-narrator of a National Geographic-style natural-history documentary. You write voice-over scripts in the measured, reverent and quietly wry voice of the great nature-documentary narrators: the voice that turns a single journey into a field report from the edge of the world. An expressive text-to-speech voice will perform your script, so write for the ear, not the page.
 
-LENGTH
-Write about ${target} spoken words (tags and pauses excluded) so the finished audio runs about ${minutes} minutes at a measured documentary pace.
+THE GOAL
+The listener should feel the story in their body, not just hear it described: the tightening shoulders, the held breath, the awe, the relief. Every image, rhythm and pause serves that feeling.
 
 CRAFT
-- Open in the middle of the sensation, not with throat-clearing. Then widen out: the mountain, its reputation, the road.
-- Build in beats with escalating tension: the approach, the tree line falling away, the grade steepening, the hairpins, the exposed edge, wind and cloud, the long drop beside the car, the summit, the release, a reflective close.
-- Be sensory and specific: engine note, tyres on gravel, a pulse in the throat, white knuckles, light on the foliage. Prefer concrete images to adjectives.
-- Vary rhythm. Long, rolling sentences for awe; short, clipped ones at peaks of fear. Let silence do work.
+- Open in the middle of the sensation, not with throat-clearing. Then widen out to the place, its history and its reputation, the way a documentary cuts from a close-up to the landscape.
+- Observe like a naturalist: give the people, the land, the weather and any wildlife the same patient, curious attention, and let one or two well-established facts about the place deepen the scene.
+- Build in beats of rising tension toward a peak, then the release, then a reflective close.
+- Be sensory and specific: sounds, textures, light, temperature, the body's reactions. Prefer concrete images to adjectives.
+- Vary rhythm. Long, rolling sentences for awe; short, clipped ones at moments of fear. Let silence do work.
 - Keep the narrator reverent, observant and a little wry, never melodramatic or cheesy. No clichés piled on top of each other, no profanity.
-- Honour the producer's brief and its first-person experience. Do not invent named people, quotes, dates or statistics. Use only well-established facts about the place, and say "roughly" or "about" when unsure.
+- Honour the producer's brief, including any first-person point of view. Do not invent named people, quotes, dates or statistics. Use only well-established facts, and say "roughly" or "about" when unsure.
+- End well. Land the story on a closing image or reflection, then sign off with a short, warm goodbye to the listener in the narrator's own voice.`;
 
-AUDIO TAGS (Fish Audio S2 syntax — square brackets)
+const PROMPT_RULES = `LENGTH
+Write about {{words}} spoken words (tags and pauses excluded) so the finished audio runs about {{minutes}} minutes at a measured documentary pace. The final sentence must be complete and sound like an ending; never stop mid-thought or mid-scene.
+
+AUDIO TAGS (Fish Audio S2 syntax: square brackets)
 - Emotion or delivery tags go at the START of the sentence they colour: [calm] [curious] [nervous] [anxious] [scared] [worried] [determined] [relieved] [awestruck] [moved] [satisfied].
 - Tone tags: [whispering] [soft tone] [low and tense] and [emphasis] placed directly before the word to stress. Free-form cues are allowed, e.g. [hushed, reverent] or [voice tightening].
 - Sound tags: [sighing] [gasping] [panting] [clear throat].
 - Pauses: [break] (short) between phrases, [long-break] at most 4 times for the biggest beats.
-- One primary emotion per sentence, at most three stacked tags, and do not tag every sentence — roughly one tag for every one to two sentences. Shift emotion gradually.
+- One primary emotion per sentence, at most three stacked tags, and do not tag every sentence: roughly one tag for every one to two sentences. Shift emotion gradually.
 - Never put tags inside quotation marks, never use parentheses for directions, and never describe sounds in prose brackets such as [wind howls] unless it is a tone cue.
 
 OUTPUT FORMAT (strict)
 Line 1: TITLE: <a short evocative episode title>
 Line 2: blank
 Then the script only: plain paragraphs separated by blank lines. No markdown, no headings, no speaker labels, no stage directions outside square brackets, no emojis, no commentary before or after.`;
+
+function buildSystemPrompt(minutes, style) {
+  const rules = PROMPT_RULES.replaceAll('{{words}}', String(Math.round(minutes * 135))).replaceAll('{{minutes}}', String(minutes));
+  return `${String(style || '').trim() || DEFAULT_SYSTEM_PROMPT}\n\n${rules}`;
 }
 
 function stripTags(text) {
@@ -146,7 +155,7 @@ async function callClaude(system, messages, maxTokens) {
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: maxTokens, system, messages }),
-    signal: AbortSignal.timeout(240_000),
+    signal: AbortSignal.timeout(360_000),
   });
   const bodyText = await res.text();
   let data = {};
@@ -161,6 +170,9 @@ async function callClaude(system, messages, maxTokens) {
     if (res.status === 429) throw new HttpError(429, 'Anthropic rate limit reached. Wait a moment and try again.');
     throw new HttpError(502, `Claude error (${res.status}): ${redact(msg)}`);
   }
+  // A cut-off reply would otherwise be voiced as-is and end mid-sentence.
+  if (data.stop_reason === 'max_tokens') throw new HttpError(502, 'Claude ran out of room before finishing, so the script was cut off. Please try again.');
+  if (data.stop_reason === 'refusal') throw new HttpError(502, 'Claude declined to write this script. Try rewording the brief.');
   return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
 }
 
@@ -170,7 +182,7 @@ async function handleNarrative(body) {
   if (!instructions) throw new HttpError(400, 'Describe what the narrative should be about first.');
   const minutes = Math.min(15, Math.max(1, Number(body.minutes) || 5));
   const target = Math.round(minutes * 135);
-  const system = buildSystemPrompt(minutes);
+  const system = buildSystemPrompt(minutes, String(body.system || '').slice(0, 20000));
 
   const messages = [
     { role: 'user', content: `Brief from the producer:\n\n${instructions}\n\nWrite the complete ${minutes}-minute voice-over script now.` },
@@ -187,7 +199,8 @@ async function handleNarrative(body) {
     );
   }
 
-  const maxTokens = Math.min(16000, Math.max(3000, Math.round(target * 3.2)));
+  // Sonnet thinks before writing and those tokens count against max_tokens (~2.5K on a 5-minute script), so leave plenty of room.
+  const maxTokens = 16000;
   let text = await callClaude(system, messages, maxTokens);
   let result = parseNarrative(text);
 
@@ -299,7 +312,13 @@ async function fishTts(text, { engine, voiceId, speed }) {
     }
     const err = new HttpError(res.status, '');
     if (res.status === 401) err.message = 'Fish Audio rejected the API key (401). Check FISH_AUDIO_API_KEY.';
-    else if (res.status === 402) err.message = 'Fish Audio says payment is required (402) — out of credit or this engine needs a paid plan. Try the S2.1 Pro — free tier engine.';
+    else if (res.status === 402) {
+      // API credit is billed separately from a fish.audio web subscription, so say which one ran out.
+      const label = ENGINES.find((e) => e.id === engine)?.label || engine;
+      err.message =
+        `Fish Audio won't voice this with ${label} (402): ${redact(detail || 'insufficient API credit.')} ` +
+        'API credit is separate from a fish.audio web subscription — add API credit at https://fish.audio/app/developers, or switch to the S2.1 Pro · free tier engine.';
+    }
     else if (res.status === 429) err.message = 'Fish Audio rate limit reached (429). Wait a moment and try again.';
     else if (res.status === 503) err.message = 'Fish Audio is under high load (503). Try again shortly.';
     else err.message = `Fish Audio error (${res.status}): ${redact(detail || res.statusText)}`;
@@ -354,6 +373,7 @@ async function handleAudio(body) {
     engine: engineDef.id,
     voiceId: voiceId || null,
     voiceTitle: String(body.voiceTitle || (voiceId ? 'Custom voice' : 'Default voice')).slice(0, 120),
+    voiceAuthor: voiceId && body.voiceAuthor ? String(body.voiceAuthor).slice(0, 120) : null,
     speed,
     words: spokenWords(script),
     bytes: audio.length,
@@ -475,6 +495,8 @@ function configPayload() {
     engines: ENGINES.map(({ id, label }) => ({ id, label })),
     defaultEngine: DEFAULT_ENGINE,
     claudeModel: CLAUDE_MODEL,
+    defaultSystemPrompt: DEFAULT_SYSTEM_PROMPT,
+    promptRules: PROMPT_RULES,
   };
 }
 
