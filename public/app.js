@@ -495,6 +495,7 @@ function loadEpisode(ep, autoplay) {
   $('#download').href = `${ep.url}${ep.url.includes('?') ? '&' : '?'}download=1`;
   $('#download').setAttribute('download', ep.file);
   $('#savedTo').textContent = ep.savedTo ? `Saved to ${ep.savedTo}` : `output/${ep.file}`;
+  showCover(ep);
 
   const t = $('#transcript');
   t.replaceChildren();
@@ -512,6 +513,30 @@ function loadEpisode(ep, autoplay) {
   $('#playerPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (autoplay) audio.play().catch(() => {});
 }
+
+/** The episode's own illustration, or the series default; older episodes can have one drawn on request. */
+function showCover(ep) {
+  $('#coverImg').src = ep.artUrl ? `${ep.artUrl}?v=${encodeURIComponent(ep.art || '')}-${Date.now()}` : '/default-art.svg';
+  $('#illustrateBtn').hidden = !!ep.artUrl;
+}
+
+$('#illustrateBtn').addEventListener('click', async () => {
+  if (!state.current || !ensureKey('anthropic')) return;
+  const btn = $('#illustrateBtn');
+  setBusy(btn, true, 'Drawing… (up to a minute)');
+  try {
+    const ep = await api('/api/illustrate', { body: { file: state.current.file } });
+    state.current = { ...state.current, ...ep };
+    showCover(state.current);
+    await refreshLibrary();
+    notice('Illustration ready.', 'ok', 4000);
+  } catch (ex) {
+    notice(ex.message);
+  } finally {
+    setBusy(btn, false);
+    if (state.current && state.current.artUrl) btn.hidden = true;
+  }
+});
 
 function syncPlayUi() {
   $('#playIcon').setAttribute('d', audio.paused ? PLAY_PATH : PAUSE_PATH);
@@ -546,13 +571,44 @@ $('#rate').addEventListener('click', () => {
   $('#rate').textContent = `${RATES[i]}×`;
 });
 document.addEventListener('keydown', (e) => {
-  if (!state.current || /^(INPUT|TEXTAREA|SELECT|BUTTON|SUMMARY)$/.test(document.activeElement?.tagName) || keysDialog.open) return;
+  if (!state.current || /^(INPUT|TEXTAREA|SELECT|BUTTON|SUMMARY)$/.test(document.activeElement?.tagName) || keysDialog.open || transcriptDialog.open) return;
   if (e.code === 'Space') { e.preventDefault(); $('#play').click(); }
   else if (e.code === 'ArrowLeft') $('#back').click();
   else if (e.code === 'ArrowRight') $('#fwd').click();
 });
 
 // ------------------------------------------------------------ library
+/** Shows the exact text that was sent to Fish Audio (saved next to the MP3 since transcripts were added). */
+const transcriptDialog = $('#transcriptDialog');
+async function showTranscript(ep) {
+  let text;
+  try {
+    const res = await fetch(ep.transcriptUrl);
+    if (!res.ok) throw new Error(String(res.status));
+    text = await res.text();
+  } catch {
+    return notice('Could not load that transcript.');
+  }
+  $('#transcriptH').textContent = ep.title;
+  $('#transcriptMeta').textContent = `The exact text Fish Audio voiced, with its audio tags (engine ${ep.engine}${ep.chunks > 1 ? `, sent in ${ep.chunks} parts` : ''}).`;
+  $('#transcriptText').textContent = text;
+  $('#transcriptDownload').href = `${ep.transcriptUrl}?download=1`;
+  $('#transcriptDownload').setAttribute('download', ep.transcript);
+  $('#transcriptCopy').textContent = 'Copy';
+  transcriptDialog.showModal();
+}
+$('#transcriptCopy').addEventListener('click', async () => {
+  const btn = $('#transcriptCopy');
+  try {
+    await navigator.clipboard.writeText($('#transcriptText').textContent);
+    btn.textContent = 'Copied';
+  } catch {
+    btn.textContent = 'Select the text to copy';
+  }
+  setTimeout(() => (btn.textContent = 'Copy'), 2500);
+});
+$('#transcriptClose').addEventListener('click', () => transcriptDialog.close());
+
 /** Two clicks: the first arms the button for a few seconds, the second deletes the audio and its record. */
 async function deleteEpisode(ep, btn) {
   if (btn.dataset.armed !== '1') {
@@ -599,6 +655,11 @@ async function refreshLibrary() {
     const li = document.createElement('li');
     li.dataset.file = ep.file;
     if (state.current && state.current.file === ep.file) li.classList.add('now');
+    const thumb = document.createElement('img');
+    thumb.className = 'ethumb';
+    thumb.alt = '';
+    thumb.loading = 'lazy';
+    thumb.src = ep.artUrl || '/default-art.svg';
     const t = document.createElement('div');
     t.className = 'etitle';
     t.textContent = ep.title;
@@ -627,8 +688,18 @@ async function refreshLibrary() {
     del.className = 'ghost danger';
     del.textContent = 'Delete';
     del.addEventListener('click', () => deleteEpisode(ep, del));
-    act.append(play, dl, del);
-    li.append(t, s, act);
+    act.append(play);
+    if (ep.transcriptUrl) {
+      const tr = document.createElement('button');
+      tr.type = 'button';
+      tr.className = 'secondary';
+      tr.textContent = 'Transcript';
+      tr.title = 'The exact text Fish Audio voiced for this episode';
+      tr.addEventListener('click', () => showTranscript(ep));
+      act.append(tr);
+    }
+    act.append(dl, del);
+    li.append(thumb, t, s, act);
     ul.append(li);
   }
 }

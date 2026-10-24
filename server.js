@@ -58,8 +58,8 @@ const ENGINES = [
   { id: 's1', label: 'S1 (legacy)', tagStyle: 'parens' },
 ];
 const DEFAULT_ENGINE = ENGINES.some((e) => e.id === process.env.FISH_MODEL) ? process.env.FISH_MODEL : 's2.1-pro-free';
-// Default narrator: "Narrator" by Rogen Darell Aban on Fish Audio. Override with FISH_VOICE_ID (a 32-character voice ID).
-const DEFAULT_VOICE_ID = /^[0-9a-f]{32}$/i.test(process.env.FISH_VOICE_ID || '') ? process.env.FISH_VOICE_ID.toLowerCase() : '785ee4188c594830bc2ec7065817c1e1';
+// Default narrator: "Sarah" by Fish Official on Fish Audio. Override with FISH_VOICE_ID (a 32-character voice ID).
+const DEFAULT_VOICE_ID = /^[0-9a-f]{32}$/i.test(process.env.FISH_VOICE_ID || '') ? process.env.FISH_VOICE_ID.toLowerCase() : '933563129e564b19a115bedd57b7406a';
 
 function cleanKey(v) {
   v = String(v || '').trim();
@@ -232,6 +232,81 @@ async function handleNarrative(body) {
   return { ...result, targetWords: target, minutes, model: CLAUDE_MODEL };
 }
 
+// ---------------------------------------------------------------- illustration (Claude draws the cover)
+const DEFAULT_ART = fs.readFileSync(path.join(PUBLIC_DIR, 'default-art.svg'), 'utf8').trim();
+
+const ART_PROMPT = `You are the illustrator for Podcast Studio, an audio documentary series. You draw one square cover illustration per episode, as a single SVG, so the listener can picture the story while they listen.
+
+STYLE (match the series)
+Flat, layered vector art in the spirit of a vintage travel poster: a gradient sky, a few overlapping silhouettes from pale in the distance to dark in the foreground, a light source such as a sun or moon, and one warm accent that draws the eye. A limited palette of 5 to 8 colours chosen for the story's setting, season and time of day. Calm, cinematic and uncluttered. Here is the series' original cover as a style reference only; do not copy its subject:
+${DEFAULT_ART}
+
+CONTENT
+- Read the story and choose its most defining setting and moment. Show the place and the situation (vehicle, terrain, sky, weather, season) the way the story describes them. No detail may contradict the story.
+- People, if shown, are small silhouettes without faces.
+- No words, letters, numbers or logos anywhere. A "PODCAST STUDIO" label is laid over the bottom-left corner, so keep that corner simple and dark.
+
+TECHNICAL (strict)
+- Output only the SVG, starting with <svg and ending with </svg>. No markdown, no commentary.
+- Root element: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">, with artwork filling the whole square.
+- Use only shapes, paths, gradients and simple filters. No <script>, <image>, <foreignObject>, <style>, <text>, event handlers or external references.
+- Keep it under 20 KB.`;
+
+/** Art is shown via <img> and served with a no-script CSP; strip anything active or external anyway. */
+function sanitizeSvg(raw) {
+  const m = String(raw || '').match(/<svg\b[\s\S]*<\/svg>/i);
+  if (!m) return null;
+  let svg = m[0]
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|foreignObject|style|iframe|object|embed|text)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<\/?(script|foreignObject|style|iframe|object|embed|image|a|text)\b[^>]*>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s(?:xlink:)?href\s*=\s*("(?!#)[^"]*"|'(?!#)[^']*')/gi, '')
+    .replace(/url\(\s*['"]?(?!#)[^)]*\)/gi, 'none')
+    .replace(/javascript:/gi, '');
+  if (!/^<svg\b[^>]*\sxmlns=/i.test(svg)) svg = svg.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return svg.length <= 200_000 ? svg : null;
+}
+
+async function drawArt(title, script) {
+  requireKey('anthropic');
+  const content = `Episode title: ${title}\n\nStory:\n${stripTags(script).slice(0, 15000)}\n\nDraw the cover illustration now.`;
+  const svg = sanitizeSvg(await callClaude(ART_PROMPT, [{ role: 'user', content }], 16000));
+  if (!svg) throw new HttpError(502, 'Claude did not return a usable illustration. Please try again.');
+  return svg;
+}
+
+async function saveArt(mp3File, svg) {
+  const art = mp3File.replace(/\.mp3$/, '.svg');
+  await fsp.writeFile(path.join(OUTPUT_DIR, art), svg);
+  return art;
+}
+
+const artUrl = (art) => (art && fs.existsSync(path.join(OUTPUT_DIR, art)) ? `/art/${encodeURIComponent(art)}` : null);
+// Episodes made before transcripts were saved have none; the app then shows no Transcript button.
+const transcriptUrl = (t) => (t && fs.existsSync(path.join(OUTPUT_DIR, t)) ? `/transcript/${encodeURIComponent(t)}` : null);
+
+/** Episode file names are bare *.mp3 names inside OUTPUT_DIR. */
+function episodeFile(name) {
+  const file = String(name || '');
+  if (!/^[A-Za-z0-9._-]+\.mp3$/.test(file) || file.startsWith('.')) throw new HttpError(400, 'Not a valid episode file name.');
+  return file;
+}
+
+async function handleIllustrate(body) {
+  const file = episodeFile(body.file);
+  const metaPath = path.join(OUTPUT_DIR, file.replace(/\.mp3$/, '.json'));
+  let meta;
+  try {
+    meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+  } catch {
+    throw new HttpError(404, 'That episode no longer exists.');
+  }
+  meta.art = await saveArt(file, await drawArt(meta.title || 'Untitled Episode', meta.script || ''));
+  await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2));
+  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(meta.art) };
+}
+
 // ---------------------------------------------------------------- audio (Fish Audio)
 const S1_TAGS = new Set([
   'happy', 'sad', 'angry', 'excited', 'calm', 'nervous', 'confident', 'surprised', 'satisfied', 'delighted',
@@ -346,9 +421,17 @@ async function handleAudio(body) {
   const voiceId = /^[A-Za-z0-9_-]{8,64}$/.test(String(body.voiceId || '')) ? String(body.voiceId) : '';
   const title = String(body.title || 'Untitled Episode').slice(0, 200);
   const text = prepareText(script, engineDef.tagStyle);
+  // Draw the cover while Fish Audio voices the script; a failed drawing never blocks the audio.
+  const artJob = keys.anthropic
+    ? drawArt(title, script).catch((err) => {
+        console.warn(`  Illustration skipped: ${redact(err.message)}`);
+        return null;
+      })
+    : Promise.resolve(null);
 
   let audio;
   let chunks = 1;
+  let sentText = text; // exactly what Fish Audio voiced, saved as the episode's audio transcript
   try {
     audio = await fishTts(text, { engine: engineDef.id, voiceId, speed });
   } catch (err) {
@@ -359,6 +442,7 @@ async function handleAudio(body) {
       for (const part of parts) bufs.push(await fishTts(part, { engine: engineDef.id, voiceId, speed }));
       audio = Buffer.concat(bufs);
       chunks = parts.length;
+      sentText = parts.join('\n\n');
     } else {
       throw err;
     }
@@ -368,6 +452,10 @@ async function handleAudio(body) {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
   const file = `${stamp}-${slugify(title)}.mp3`;
   await fsp.writeFile(path.join(OUTPUT_DIR, file), audio);
+  const transcript = file.replace(/\.mp3$/, '.txt');
+  await fsp.writeFile(path.join(OUTPUT_DIR, transcript), sentText);
+  const svg = await artJob;
+  const art = svg ? await saveArt(file, svg) : null;
   const meta = {
     file,
     title,
@@ -380,10 +468,12 @@ async function handleAudio(body) {
     words: spokenWords(script),
     bytes: audio.length,
     chunks,
+    art,
+    transcript,
     script,
   };
   await fsp.writeFile(path.join(OUTPUT_DIR, file.replace(/\.mp3$/, '.json')), JSON.stringify(meta, null, 2));
-  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, savedTo: path.join('output', file) };
+  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(art), transcriptUrl: transcriptUrl(transcript), savedTo: path.join('output', file) };
 }
 
 function voiceItem(m) {
@@ -449,7 +539,7 @@ async function listEpisodes() {
     try {
       const meta = JSON.parse(await fsp.readFile(path.join(OUTPUT_DIR, n), 'utf8'));
       if (meta.file && fs.existsSync(path.join(OUTPUT_DIR, meta.file))) {
-        out.push({ ...meta, url: `/audio/${encodeURIComponent(meta.file)}` });
+        out.push({ ...meta, url: `/audio/${encodeURIComponent(meta.file)}`, artUrl: artUrl(meta.art), transcriptUrl: transcriptUrl(meta.transcript) });
       }
     } catch {
       /* skip unreadable */
@@ -459,9 +549,7 @@ async function listEpisodes() {
 }
 
 async function handleDelete(body) {
-  const file = String(body.file || '');
-  // Same rule as serving audio: a bare .mp3 name inside OUTPUT_DIR, no paths.
-  if (!/^[A-Za-z0-9._-]+\.mp3$/.test(file) || file.startsWith('.')) throw new HttpError(400, 'Not a valid episode file name.');
+  const file = episodeFile(body.file);
   const mp3 = path.join(OUTPUT_DIR, file);
   try {
     await fsp.unlink(mp3);
@@ -469,6 +557,8 @@ async function handleDelete(body) {
     throw new HttpError(404, 'That episode no longer exists.');
   }
   await fsp.unlink(mp3.replace(/\.mp3$/, '.json')).catch(() => {});
+  await fsp.unlink(mp3.replace(/\.mp3$/, '.svg')).catch(() => {});
+  await fsp.unlink(mp3.replace(/\.mp3$/, '.txt')).catch(() => {});
   return { deleted: file };
 }
 
@@ -549,6 +639,7 @@ const STATIC = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
+  '/default-art.svg': ['default-art.svg', 'image/svg+xml'],
 };
 
 function sendJson(res, status, obj) {
@@ -595,6 +686,42 @@ function sameOrigin(req) {
   } catch {
     return false;
   }
+}
+
+function serveTranscript(res, name, download) {
+  if (!/^[A-Za-z0-9._-]+\.txt$/.test(name) || name.startsWith('.')) return sendJson(res, 404, { error: 'Not found' });
+  let body;
+  try {
+    body = fs.readFileSync(path.join(OUTPUT_DIR, name));
+  } catch {
+    return sendJson(res, 404, { error: 'Not found' });
+  }
+  const headers = {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Security-Policy': "default-src 'none'",
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'no-store',
+  };
+  if (download) headers['Content-Disposition'] = `attachment; filename="${name}"`;
+  res.writeHead(200, headers);
+  res.end(body);
+}
+
+function serveArt(res, name) {
+  if (!/^[A-Za-z0-9._-]+\.svg$/.test(name) || name.startsWith('.')) return sendJson(res, 404, { error: 'Not found' });
+  let body;
+  try {
+    body = fs.readFileSync(path.join(OUTPUT_DIR, name));
+  } catch {
+    return sendJson(res, 404, { error: 'Not found' });
+  }
+  res.writeHead(200, {
+    'Content-Type': 'image/svg+xml',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
 }
 
 function serveAudio(req, res, name, download) {
@@ -659,6 +786,8 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/config') return sendJson(res, 200, configPayload());
       if (p === '/api/episodes') return sendJson(res, 200, { episodes: await listEpisodes() });
       if (p === '/api/voices') return sendJson(res, 200, await handleVoices(url));
+      if (p.startsWith('/art/')) return serveArt(res, decodeURIComponent(p.slice(5)));
+      if (p.startsWith('/transcript/')) return serveTranscript(res, decodeURIComponent(p.slice(12)), url.searchParams.get('download') === '1');
       if (p.startsWith('/audio/')) return serveAudio(req, res, decodeURIComponent(p.slice(7)), url.searchParams.get('download') === '1');
       return sendJson(res, 404, { error: 'Not found' });
     }
@@ -672,6 +801,7 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/narrative') return sendJson(res, 200, await handleNarrative(body));
       if (p === '/api/audio') return sendJson(res, 200, await handleAudio(body));
       if (p === '/api/delete') return sendJson(res, 200, await handleDelete(body));
+      if (p === '/api/illustrate') return sendJson(res, 200, await handleIllustrate(body));
       return sendJson(res, 404, { error: 'Not found' });
     }
 

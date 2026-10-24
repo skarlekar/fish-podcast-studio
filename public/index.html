@@ -117,21 +117,7 @@
     <section class="panel player" id="playerPanel" aria-labelledby="playerH" hidden>
       <div class="player-grid">
         <div class="cover" aria-hidden="true">
-          <svg viewBox="0 0 400 400" preserveAspectRatio="xMidYMid slice">
-            <defs>
-              <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stop-color="#1f2a44"/>
-                <stop offset="0.55" stop-color="#7a4a3a"/>
-                <stop offset="1" stop-color="#e8a24a"/>
-              </linearGradient>
-            </defs>
-            <rect width="400" height="400" fill="url(#sky)"/>
-            <circle cx="300" cy="120" r="34" fill="#f6dba0" opacity=".85"/>
-            <path d="M0 290 90 170l55 70 55-95 80 110 40-50 80 95v100H0z" fill="#26283a"/>
-            <path d="M0 330 70 250l60 55 70-80 90 100 110-70v145H0z" fill="#14161f"/>
-            <path d="M-10 400 160 300 230 340 420 250v150z" fill="#0b0c12"/>
-            <path d="M205 400c10-40 40-60 64-80s40-40 56-70" fill="none" stroke="#e8b64a" stroke-width="3" stroke-dasharray="9 9" opacity=".8"/>
-          </svg>
+          <img id="coverImg" src="/default-art.svg" alt="">
           <span class="cover-tag">Podcast Studio</span>
         </div>
 
@@ -155,6 +141,7 @@
           <div class="row wrap">
             <a id="download" class="secondary btn" href="#" download>Download MP3</a>
             <span class="saved" id="savedTo"></span>
+            <button id="illustrateBtn" class="ghost small" type="button" hidden title="Claude draws a cover for this episode from its story">Create illustration</button>
           </div>
           <details class="transcript">
             <summary>Transcript</summary>
@@ -195,6 +182,17 @@
         <button id="keysSave" class="primary" type="submit">Save &amp; continue</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="transcriptDialog" class="wide" aria-labelledby="transcriptH">
+    <h2 id="transcriptH">Audio transcript</h2>
+    <p class="lede" id="transcriptMeta"></p>
+    <pre id="transcriptText" class="transcript-text"></pre>
+    <div class="row end">
+      <button id="transcriptCopy" class="ghost" type="button">Copy</button>
+      <a id="transcriptDownload" class="ghost btn" href="#" download>Download .txt</a>
+      <button id="transcriptClose" class="primary" type="button">Close</button>
+    </div>
   </dialog>
 
   <script src="/app.js"></script>

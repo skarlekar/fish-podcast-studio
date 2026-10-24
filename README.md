@@ -9,7 +9,7 @@
 
 ![The brief: editable system and user prompts](docs/brief.png)
 
-Podcast Studio is a small, self-hosted web app. You describe a story; Claude writes it as a National Geographic-style nature-documentary voice-over, complete with expressive delivery cues; you review and edit the script; Fish Audio performs it; and you listen in a podcast-style player, with every episode saved as an MP3.
+Podcast Studio is a small, self-hosted web app. You describe a story; Claude writes it as a National Geographic-style nature-documentary voice-over, complete with expressive delivery cues; you review and edit the script; Fish Audio performs it while Claude draws cover art from the story; and you listen in a podcast-style player, with every episode saved as an MP3.
 
 ---
 
@@ -66,8 +66,9 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 | **Length control** | Pick 1–10 minutes; the app targets about 135 spoken words per minute and asks Claude to correct a draft that misses by more than 15% |
 | **Voices** | A default narrator is pre-selected; search Fish Audio's library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the voice, its creator and its ID |
 | **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
+| **Story artwork** | Claude draws a cover illustration for each episode from its story, in the series' flat, poster-like style, shown in the player and the library. Older episodes get a *Create illustration* button |
 | **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
-| **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion |
+| **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion. *Transcript* shows the exact text Fish Audio voiced, with its audio tags, to read, copy or download |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
 
 ![The player and episode library](docs/player.png)
@@ -92,8 +93,8 @@ flowchart LR
 1. **Brief.** You write or edit two prompts. The **system prompt** sets the voice; the default casts Claude as a nature-documentary writer. The **user prompt** is the story.
 2. **Write.** The server sends both to Claude Sonnet (`claude-sonnet-5-5`). It appends fixed rules after your system prompt: the word target for the chosen length, Fish Audio's tag syntax and a strict output format. That way an edited prompt can't break the steps that follow. If the draft is more than 15% off the target length, the server asks Claude for one corrected version. A reply that was cut off (`stop_reason: max_tokens`) is rejected rather than shown.
 3. **Review.** The script appears in an editor with a tag preview. Edit it directly, send feedback for a revision, or start over.
-4. **Voice.** On approval, the server sends the script to Fish Audio's text-to-speech API with your chosen engine, voice and speed. For the legacy `s1` engine, `[bracket]` tags are converted to its `(parenthesis)` set and unsupported ones are dropped. If a long script is rejected as one request, it is retried paragraph by paragraph and the audio joined.
-5. **Listen.** The MP3 and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
+4. **Voice and illustrate.** On approval, the server sends the script to Fish Audio's text-to-speech API with your chosen engine, voice and speed. At the same time, Claude reads the story and draws a cover as an SVG, using the series' original artwork as a style reference. If the drawing fails, the audio is still saved and the episode keeps the default art. For the legacy `s1` engine, `[bracket]` tags are converted to its `(parenthesis)` set and unsupported ones are dropped. If a long script is rejected as one request, it is retried paragraph by paragraph and the audio joined.
+5. **Listen.** The MP3, the cover SVG, the audio transcript (the exact text sent to Fish Audio, as `.txt`) and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
 
 All calls to Claude and Fish Audio are made by the local server; the browser only talks to `localhost`.
 
@@ -136,7 +137,7 @@ Keys and settings can go in `.env` (see [`.env.example`](.env.example)) or real 
 | `FISH_AUDIO_API_KEY` | — | Fish Audio API key (or enter it in the browser) |
 | `PORT` | `3000` | Port to listen on |
 | `FISH_MODEL` | `s2.1-pro-free` | Default audio engine in the picker |
-| `FISH_VOICE_ID` | `785ee418…c1e1` | Default narrator voice ("Narrator" by Rogen Darell Aban). Any 32-character Fish Audio voice ID |
+| `FISH_VOICE_ID` | `93356312…406a` | Default narrator voice ("Sarah" by Fish Official). Any 32-character Fish Audio voice ID |
 | `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for writing |
 | `OUTPUT_DIR` | `./output` | Where episodes are saved |
 | `HOST` | `127.0.0.1` | Bind address. Leave as is; Docker sets it inside the container only |
@@ -159,7 +160,7 @@ Both prompts are edited in the **Brief** panel.
 
 ## Voices
 
-Every episode starts with the **default narrator** selected: Fish Audio's "Narrator" voice by Rogen Darell Aban (ID `785ee4188c594830bc2ec7065817c1e1`). To use a different voice for an episode, pick another in the Production panel; to change the default, set `FISH_VOICE_ID` in `.env`.
+Every episode starts with the **default narrator** selected: Fish Audio's "Sarah" voice by Fish Official (ID `933563129e564b19a115bedd57b7406a`), a soft, conversational narrator. To use a different voice for an episode, pick another in the Production panel; to change the default, set `FISH_VOICE_ID` in `.env`.
 
 Fish Audio's voice search matches **voice titles only**, not creator names, and many voices share titles such as "Narrator". To find a specific voice:
 
@@ -183,13 +184,14 @@ Fish Audio's voice search matches **voice titles only**, not creator names, and 
 
 Podcast Studio itself is free; the two APIs it calls are billed by their providers.
 
-- **Claude:** one or two Sonnet requests per script (two if a length correction is needed). See [Anthropic pricing](https://www.anthropic.com/pricing).
+- **Claude:** one or two Sonnet requests per script (two if a length correction is needed), plus one per episode for its cover illustration. See [Anthropic pricing](https://www.anthropic.com/pricing).
 - **Fish Audio:** charged per generated audio from your **API credit**, except on the free-tier engine. API credit is separate from a fish.audio web subscription; top it up at <https://fish.audio/app/developers>.
 
 ## Security and privacy
 
 - The server binds to `127.0.0.1`, rejects requests whose `Host` header isn't a loopback name (protecting against DNS rebinding), and rejects cross-origin `POST`s.
 - API keys are held by the server only. No endpoint returns them, and they are redacted from error messages.
+- Cover illustrations are cleaned of scripts, event handlers, embedded content and external links, displayed only as images, and served with a policy that blocks scripts.
 - A `.env` saved by the app is written with owner-only (`600`) permissions. `.env` and `output/` are git-ignored, and `.dockerignore` keeps them out of the Docker image.
 - Your prompts and scripts are sent to Anthropic, and approved scripts to Fish Audio, under their respective terms. Nothing else leaves your machine.
 
@@ -214,14 +216,14 @@ The test suite starts the real server against mock Claude and Fish Audio endpoin
 
 ```
 server.js          Node server: static files, Claude + Fish Audio proxy, keys, audio streaming, library
-public/            index.html, styles.css, app.js (the one-page app)
+public/            index.html, styles.css, app.js (the one-page app), default-art.svg (series cover)
 test/smoke.js      End-to-end tests with mock upstreams
 start.sh           Start with Node and open the browser
 start-docker.sh    Build and run the Docker container, then open the browser
 start-common.sh    Shared by both: busy-port prompt, readiness check, browser opening
 Dockerfile         Node 22 Alpine image (no keys or audio inside)
 docs/              Screenshots
-output/            Generated .mp3 + .json (git-ignored)
+output/            Per episode: .mp3, .svg cover, .txt audio transcript, .json record (git-ignored)
 ```
 
 Issues and pull requests are welcome. Please run `npm test` before submitting.

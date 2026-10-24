@@ -9,8 +9,9 @@ const assert = require('node:assert/strict');
 
 const CLAUDE_KEY = 'sk-ant-test-0123456789';
 const FISH_KEY = 'fish-test-0123456789';
-const calls = { claude: [], tts: [], model: [] };
+const calls = { claude: [], tts: [], model: [], art: [], artFailNext: false };
 const VOICE_ID = '785ee4188c594830bc2ec7065817c1e1';
+const SARAH_ID = '933563129e564b19a115bedd57b7406a';
 const AUTHOR_ID = '9672b25f05dd4f7fa38257dea00ad01d';
 
 const SCRIPT = (n) =>
@@ -27,6 +28,16 @@ function mockUpstream() {
       if (req.url === '/v1/messages') {
         if (req.headers['x-api-key'] !== CLAUDE_KEY) return json(401, { error: { message: 'invalid x-api-key' } });
         const parsed = JSON.parse(body);
+        // Illustration requests: answer with an SVG (unsafe parts included when the story says EVIL).
+        if (/illustrator for Podcast Studio/.test(parsed.system)) {
+          calls.art.push(parsed);
+          if (calls.artFailNext) { calls.artFailNext = false; return json(500, { error: { message: 'art down' } }); }
+          const evil = /EVIL/.test(parsed.messages[0].content);
+          const svg = evil
+            ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" onload="alert(1)"><script>alert(2)</script><foreignObject><div>x</div></foreignObject><image href="http://evil.example.com/x.png"/><rect width="400" height="400" fill="#123" onclick="steal()"/></svg>'
+            : '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><rect width="400" height="400" fill="#123"/><circle cx="200" cy="120" r="30" fill="#fe9"/></svg>';
+          return json(200, { stop_reason: 'end_turn', content: [{ type: 'text', text: `Here you go:\n${svg}\n` }] });
+        }
         calls.claude.push(parsed);
         // A brief containing CUTOFF simulates Claude hitting max_tokens mid-sentence.
         if (/CUTOFF/.test(parsed.messages[0].content)) {
@@ -101,7 +112,7 @@ async function check(name, fn) {
     assert.match(c.defaultSystemPrompt, /National Geographic/);
     assert.match(c.defaultSystemPrompt, /feel/i);
     assert.match(c.promptRules, /\{\{words\}\}/, 'rules template exposed for display');
-    assert.equal(c.defaultVoiceId, VOICE_ID, 'Rogen Darell Aban narrator is the default voice');
+    assert.equal(c.defaultVoiceId, SARAH_ID, 'Sarah (Fish Official) is the default voice');
   });
   await check('refuses to call Claude without a key', async () => {
     assert.equal((await post('/api/narrative', { instructions: 'x' })).status, 401);
@@ -210,10 +221,91 @@ async function check(name, fn) {
     assert.ok(fs.existsSync(path.join(tmp, 'output', a.file)));
     episode.url = a.url;
   });
+  await check('illustration: drawn from the script alongside the audio and served safely', async () => {
+    calls.art.length = 0;
+    const r = await post('/api/audio', { title: 'Skydive', script: '[nervous] The door slides open at thirteen thousand feet. Wind roars in.', engine: 's2.1-pro-free' });
+    const a = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(a));
+    assert.match(a.art, /\.svg$/);
+    assert.equal(calls.art.length, 1);
+    assert.match(calls.art[0].messages[0].content, /thirteen thousand feet/, 'story text sent to the illustrator');
+    assert.match(calls.art[0].system, /style reference/i, 'current art given as the style reference');
+    const img = await get(a.artUrl);
+    assert.equal(img.status, 200);
+    assert.match(img.headers.get('content-type'), /image\/svg\+xml/);
+    assert.match(img.headers.get('content-security-policy') || '', /default-src 'none'/);
+    const body = await img.text();
+    assert.ok(body.startsWith('<svg') && body.includes('<circle'));
+    const { episodes } = await (await get('/api/episodes')).json();
+    assert.equal(episodes.find((e) => e.file === a.file).artUrl, a.artUrl);
+  });
+  await check('illustration: scripts, handlers, foreign content and external links are stripped', async () => {
+    const a = await (await post('/api/audio', { title: 'Evil', script: 'EVIL story text that is long enough to voice.', engine: 's2.1-pro-free' })).json();
+    const body = await (await get(a.artUrl)).text();
+    for (const bad of ['<script', 'onload', 'onclick', 'foreignObject', 'evil.example.com']) assert.ok(!body.includes(bad), bad);
+    assert.ok(body.includes('<rect'));
+  });
+  await check('illustration: a failed drawing never blocks the audio; it can be created later', async () => {
+    calls.artFailNext = true;
+    const a = await (await post('/api/audio', { title: 'No art yet', script: 'A quiet story long enough to voice here.', engine: 's2.1-pro-free' })).json();
+    assert.ok(a.file && !a.art, 'audio saved without art');
+    const r = await post('/api/illustrate', { file: a.file });
+    const ep = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(ep));
+    assert.match(ep.art, /\.svg$/);
+    assert.equal((await get(ep.artUrl)).status, 200);
+    const d = await post('/api/delete', { file: a.file });
+    assert.equal(d.status, 200);
+    assert.equal((await get(ep.artUrl)).status, 404, 'delete removes the illustration too');
+    assert.equal((await post('/api/illustrate', { file: '../server.js' })).status, 400);
+    assert.equal((await get('/art/..%2Fserver.js')).status, 404);
+  });
+  await check('audio transcript: the exact text sent to Fish Audio is saved and served', async () => {
+    const script = '[calm]   The valley opens below.   \n\n\n\n[soft tone] We breathe.';
+    const r = await post('/api/audio', { title: 'Transcript test', script, engine: 's2.1-pro-free' });
+    const a = await r.json();
+    assert.match(a.transcript, /\.txt$/);
+    const res = await get(a.transcriptUrl);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/plain/);
+    assert.equal(await res.text(), calls.tts.at(-1).body.text);
+    assert.match((await get(`${a.transcriptUrl}?download=1`)).headers.get('content-disposition') || '', /attachment/);
+    const { episodes } = await (await get('/api/episodes')).json();
+    assert.equal(episodes.find((e) => e.file === a.file).transcriptUrl, a.transcriptUrl);
+    // An older episode without a saved transcript reports none.
+    const oldJson = path.join(tmp, 'output', a.file.replace(/\.mp3$/, '.json'));
+    fs.copyFileSync(path.join(tmp, 'output', a.file), path.join(tmp, 'output', 'old-episode.mp3'));
+    const meta = JSON.parse(fs.readFileSync(oldJson, 'utf8'));
+    delete meta.transcript;
+    fs.writeFileSync(path.join(tmp, 'output', 'old-episode.json'), JSON.stringify({ ...meta, file: 'old-episode.mp3' }));
+    const after = (await (await get('/api/episodes')).json()).episodes;
+    assert.equal(after.find((e) => e.file === 'old-episode.mp3').transcriptUrl, null);
+    assert.equal((await post('/api/delete', { file: a.file })).status, 200);
+    assert.equal((await get(a.transcriptUrl)).status, 404, 'delete removes the transcript too');
+    assert.equal((await get('/transcript/..%2Fserver.js')).status, 404);
+  });
+  await check('library shows a Transcript button only when a transcript was saved', async () => {
+    const html = await (await get('/')).text();
+    assert.match(html, /id="transcriptDialog"/);
+    const js = await (await get('/app.js')).text();
+    assert.match(js, /if \(ep\.transcriptUrl\)/);
+  });
+  await check('player shows the episode art, with a default and a create button', async () => {
+    const html = await (await get('/')).text();
+    assert.match(html, /id="coverImg"[^>]*src="\/default-art\.svg"/);
+    assert.match(html, /id="illustrateBtn"/);
+    assert.equal((await get('/default-art.svg')).status, 200);
+    const js = await (await get('/app.js')).text();
+    assert.match(js, /ep\.artUrl/);
+    assert.match(js, /\/api\/illustrate/);
+  });
   await check('audio: s1 converts to (parentheses) and drops unknown tags', async () => {
     const r = await post('/api/audio', { title: 't', script: '[nervous, hushed] Hello there friend. [long-break] [voice tightening] Again.', engine: 's1' });
     assert.equal(r.status, 200);
+    const a = await r.json();
     const t = calls.tts.at(-1);
+    const saved = await (await get(a.transcriptUrl)).text();
+    assert.equal(saved, t.body.text, 'the saved transcript is exactly the converted text sent to Fish Audio');
     assert.equal(t.model, 's1');
     assert.match(t.body.text, /\(nervous\) Hello there friend\. \(long-break\) Again\./);
     assert.ok(!t.body.text.includes('['));
