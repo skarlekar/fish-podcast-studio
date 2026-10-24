@@ -59,6 +59,8 @@ const ENGINES = [
 ];
 const DEFAULT_ENGINE = ENGINES.some((e) => e.id === process.env.FISH_MODEL) ? process.env.FISH_MODEL : 's2.1-pro-free';
 // Default narrator: "Sarah" by Fish Official on Fish Audio. Override with FISH_VOICE_ID (a 32-character voice ID).
+// Fish Audio's own voices (fish.audio/app/default-voices) are published by this account.
+const FISH_OFFICIAL_ID = 'd8b0991f96b44e489422ca2ddf0bd31d';
 const DEFAULT_VOICE_ID = /^[0-9a-f]{32}$/i.test(process.env.FISH_VOICE_ID || '') ? process.env.FISH_VOICE_ID.toLowerCase() : '933563129e564b19a115bedd57b7406a';
 
 function cleanKey(v) {
@@ -303,8 +305,74 @@ async function handleIllustrate(body) {
     throw new HttpError(404, 'That episode no longer exists.');
   }
   meta.art = await saveArt(file, await drawArt(meta.title || 'Untitled Episode', meta.script || ''));
+  meta.coverOf = null; // the MP3 still carries the previous picture
   await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2));
-  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(meta.art) };
+  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(meta.art), needsCover: true };
+}
+
+// ---------------------------------------------------------------- MP3 cover tag (ID3v2.3)
+// Players only show PNG/JPEG covers, so the browser renders the SVG illustration to PNG and posts it here;
+// the server writes it into the MP3 with the title, narrator and album.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function id3Frame(id, data) {
+  const head = Buffer.alloc(10);
+  head.write(id, 0, 'latin1');
+  head.writeUInt32BE(data.length, 4);
+  return Buffer.concat([head, data]);
+}
+
+// Encoding 1 = UTF-16 with BOM, so titles keep curly quotes and non-Latin letters.
+const id3Text = (id, text) => id3Frame(id, Buffer.concat([Buffer.from([1, 0xff, 0xfe]), Buffer.from(String(text), 'utf16le')]));
+
+function buildId3({ title, artist, album, png }) {
+  const apic = Buffer.concat([Buffer.from([0]), Buffer.from('image/png\0', 'latin1'), Buffer.from([3, 0]), png]); // 3 = front cover
+  const body = Buffer.concat([id3Text('TIT2', title), ...(artist ? [id3Text('TPE1', artist)] : []), id3Text('TALB', album), id3Frame('APIC', apic)]);
+  const n = body.length; // the tag size is "synchsafe": 7 bits per byte
+  return Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, (n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f]), body]);
+}
+
+/** Length of an ID3v2 tag at the start of the file, so re-tagging replaces it; 0 if there is none. */
+function id3Length(buf) {
+  if (buf.length < 10 || buf.toString('latin1', 0, 3) !== 'ID3' || buf[3] < 2 || buf[3] > 4) return 0;
+  if ([6, 7, 8, 9].some((i) => buf[i] > 0x7f)) return 0;
+  const total = 10 + ((buf[6] << 21) | (buf[7] << 14) | (buf[8] << 7) | buf[9]) + (buf[5] & 0x10 ? 10 : 0);
+  return total <= buf.length ? total : 0;
+}
+
+/** The narrator's name for the Artist field: the voice name, or its creator when the title is generic. */
+function narratorName(meta) {
+  if (!meta.voiceId) return null;
+  const title = String(meta.voiceTitle || '').trim();
+  const generic = !title || /^(the )?(narrator|narration|voice|custom voice)$/i.test(title);
+  return generic ? meta.voiceAuthor || null : title;
+}
+
+/** Which picture an episode's MP3 should carry: its illustration, or the series default. */
+const coverWanted = (meta) => (artUrl(meta.art) ? meta.art : 'default');
+
+async function handleCover(body) {
+  const file = episodeFile(body.file);
+  const png = Buffer.from(String(body.png || ''), 'base64');
+  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIGNATURE)) throw new HttpError(400, 'The cover must be a PNG image.');
+  const mp3 = path.join(OUTPUT_DIR, file);
+  const metaPath = mp3.replace(/\.mp3$/, '.json');
+  let audio;
+  let meta;
+  try {
+    audio = await fsp.readFile(mp3);
+    meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+  } catch {
+    throw new HttpError(404, 'That episode no longer exists.');
+  }
+  const tag = buildId3({ title: meta.title || 'Untitled Episode', artist: narratorName(meta), album: 'Podcast Studio', png });
+  const tagged = Buffer.concat([tag, audio.subarray(id3Length(audio))]);
+  await fsp.writeFile(`${mp3}.tmp`, tagged);
+  await fsp.rename(`${mp3}.tmp`, mp3); // atomic: a reader sees the old file or the new one, never half of each
+  meta.coverOf = coverWanted(meta);
+  meta.bytes = tagged.length;
+  await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2));
+  return { file, needsCover: false, bytes: tagged.length };
 }
 
 // ---------------------------------------------------------------- audio (Fish Audio)
@@ -473,7 +541,7 @@ async function handleAudio(body) {
     script,
   };
   await fsp.writeFile(path.join(OUTPUT_DIR, file.replace(/\.mp3$/, '.json')), JSON.stringify(meta, null, 2));
-  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(art), transcriptUrl: transcriptUrl(transcript), savedTo: path.join('output', file) };
+  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(art), transcriptUrl: transcriptUrl(transcript), needsCover: true, savedTo: path.join('output', file) };
 }
 
 function voiceItem(m) {
@@ -485,6 +553,7 @@ function voiceItem(m) {
     sample: m.samples?.[0]?.audio || null,
     author: m.author?.nickname || null,
     authorId: m.author?._id || null,
+    official: m.author?._id === FISH_OFFICIAL_ID,
   };
 }
 
@@ -503,7 +572,8 @@ async function fishGet(pathAndQuery) {
 
 /**
  * Voice search. Fish Audio only matches voice titles, so also accept a voice ID or fish.audio link in `q`
- * (direct lookup) and `author=<creator id>` (that creator's voices).
+ * (direct lookup) and `author=<creator id>` (that creator's voices). With no query, list Fish Audio's official
+ * English voices; title searches put official matches first.
  */
 async function handleVoices(url) {
   requireKey('fish');
@@ -518,13 +588,23 @@ async function handleVoices(url) {
     return { total: items.length, page: 1, items };
   }
 
-  const params = new URLSearchParams({ page_size: '12', page_number: String(page), sort_by: 'score' });
-  if (/^[0-9a-f]{32}$/i.test(author)) params.set('author_id', author);
-  else params.set('language', 'en');
-  if (q) params.set('title', q.slice(0, 80));
-  const data = (await fishGet(`/model?${params}`)) || {};
-  const items = (data.items || []).map(voiceItem);
-  return { total: data.total ?? items.length, page, items };
+  const search = async ({ authorId, title, size }) => {
+    const params = new URLSearchParams({ page_size: String(size), page_number: String(page), sort_by: 'score' });
+    if (authorId) params.set('author_id', authorId);
+    // Narration is English; a non-official creator's voices are listed in every language.
+    if (!authorId || authorId === FISH_OFFICIAL_ID) params.set('language', 'en');
+    if (title) params.set('title', title.slice(0, 80));
+    const data = (await fishGet(`/model?${params}`)) || {};
+    return { total: data.total ?? 0, items: (data.items || []).map(voiceItem) };
+  };
+
+  if (/^[0-9a-f]{32}$/i.test(author)) return { page, ...(await search({ authorId: author, size: 24 })) };
+  if (!q) return { page, official: true, ...(await search({ authorId: FISH_OFFICIAL_ID, size: 24 })) };
+
+  const [official, everyone] = await Promise.all([search({ authorId: FISH_OFFICIAL_ID, title: q, size: 12 }), search({ title: q, size: 12 })]);
+  const seen = new Set();
+  const items = [...official.items, ...everyone.items].filter((v) => !seen.has(v.id) && seen.add(v.id));
+  return { total: Math.max(everyone.total, items.length), page, items };
 }
 
 async function listEpisodes() {
@@ -539,7 +619,13 @@ async function listEpisodes() {
     try {
       const meta = JSON.parse(await fsp.readFile(path.join(OUTPUT_DIR, n), 'utf8'));
       if (meta.file && fs.existsSync(path.join(OUTPUT_DIR, meta.file))) {
-        out.push({ ...meta, url: `/audio/${encodeURIComponent(meta.file)}`, artUrl: artUrl(meta.art), transcriptUrl: transcriptUrl(meta.transcript) });
+        out.push({
+          ...meta,
+          url: `/audio/${encodeURIComponent(meta.file)}`,
+          artUrl: artUrl(meta.art),
+          transcriptUrl: transcriptUrl(meta.transcript),
+          needsCover: meta.coverOf !== coverWanted(meta),
+        });
       }
     } catch {
       /* skip unreadable */
@@ -802,6 +888,7 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/audio') return sendJson(res, 200, await handleAudio(body));
       if (p === '/api/delete') return sendJson(res, 200, await handleDelete(body));
       if (p === '/api/illustrate') return sendJson(res, 200, await handleIllustrate(body));
+      if (p === '/api/cover') return sendJson(res, 200, await handleCover(body));
       return sendJson(res, 404, { error: 'Not found' });
     }
 

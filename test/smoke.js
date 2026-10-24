@@ -12,7 +12,27 @@ const FISH_KEY = 'fish-test-0123456789';
 const calls = { claude: [], tts: [], model: [], art: [], artFailNext: false };
 const VOICE_ID = '785ee4188c594830bc2ec7065817c1e1';
 const SARAH_ID = '933563129e564b19a115bedd57b7406a';
+const OFFICIAL_ID = 'd8b0991f96b44e489422ca2ddf0bd31d'; // Fish Official account
 const AUTHOR_ID = '9672b25f05dd4f7fa38257dea00ad01d';
+
+// A real 1x1 PNG, standing in for the cover the browser renders from the illustration.
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** Minimal ID3v2.3 reader for the checks: returns { frames: { ID: Buffer }, audio: Buffer }. */
+function readId3(buf) {
+  assert.equal(buf.subarray(0, 3).toString('latin1'), 'ID3', 'starts with an ID3 tag');
+  assert.equal(buf[3], 3, 'ID3v2.3');
+  const size = (buf[6] << 21) | (buf[7] << 14) | (buf[8] << 7) | buf[9];
+  const frames = {};
+  for (let i = 10; i + 10 <= 10 + size && buf[i] !== 0; ) {
+    const id = buf.subarray(i, i + 4).toString('latin1');
+    const len = buf.readUInt32BE(i + 4);
+    frames[id] = buf.subarray(i + 10, i + 10 + len);
+    i += 10 + len;
+  }
+  return { frames, audio: buf.subarray(10 + size) };
+}
+const id3Text = (b) => (b[0] === 1 ? b.subarray(3).toString('utf16le') : b.subarray(1).toString('latin1')).replace(/\0+$/, '');
 
 const SCRIPT = (n) =>
   'TITLE: The Road to the Sky\n\n' +
@@ -62,6 +82,11 @@ function mockUpstream() {
         if (one) {
           if (one[1] !== VOICE_ID) return json(404, { message: 'not found' });
           return json(200, { _id: VOICE_ID, title: 'Narrator', tags: ['male'], samples: [], author: { _id: AUTHOR_ID, nickname: 'Rogen Darell Aban' } });
+        }
+        const qs = new URL(req.url, 'http://x').searchParams;
+        if (qs.get('author_id') === OFFICIAL_ID) {
+          const official = { _id: SARAH_ID, title: qs.get('title') ? 'Official Narrator' : 'Sarah', tags: ['female'], samples: [{ audio: 'https://example.com/o.mp3' }], author: { _id: OFFICIAL_ID, nickname: 'Fish Official' } };
+          return json(200, { total: 30, items: [official] });
         }
         return json(200, { total: 1, items: [{ _id: 'abcdef1234567890', title: 'Doc Narrator', description: 'Warm', tags: ['narration'], samples: [{ audio: 'https://example.com/s.mp3' }], author: { _id: AUTHOR_ID, nickname: 'fish' } }] });
       }
@@ -185,11 +210,23 @@ async function check(name, fn) {
     assert.ok(calls.claude[0].messages.some((m) => m.role === 'assistant'));
     assert.match(calls.claude[0].messages.at(-1).content, /scarier/);
   });
-  await check('voices list proxied', async () => {
+  await check('voices list proxied; official matches come first and are marked', async () => {
+    calls.model.length = 0;
     const v = await (await get('/api/voices?q=narrator')).json();
-    assert.equal(v.items[0].title, 'Doc Narrator');
-    assert.equal(v.items[0].sample, 'https://example.com/s.mp3');
-    assert.equal(v.items[0].authorId, AUTHOR_ID);
+    assert.deepEqual(v.items.map((i) => [i.title, i.official]), [['Official Narrator', true], ['Doc Narrator', false]]);
+    const doc = v.items[1];
+    assert.equal(doc.sample, 'https://example.com/s.mp3');
+    assert.equal(doc.authorId, AUTHOR_ID);
+    assert.ok(calls.model.some((u) => u.includes(`author_id=${OFFICIAL_ID}`) && u.includes('title=narrator')), 'official voices searched too');
+  });
+  await check('with no search, the official English voices are listed (paged)', async () => {
+    calls.model.length = 0;
+    const v = await (await get('/api/voices?page=2')).json();
+    assert.equal(v.total, 30);
+    assert.ok(v.items.length && v.items.every((i) => i.official));
+    assert.equal(v.official, true);
+    const u = calls.model.at(-1);
+    assert.ok(u.includes(`author_id=${OFFICIAL_ID}`) && u.includes('language=en') && u.includes('page_number=2'), u);
   });
   await check('voice lookup by ID or fish.audio link', async () => {
     for (const q of [VOICE_ID, `https://fish.audio/m/${VOICE_ID}/`]) {
@@ -284,11 +321,58 @@ async function check(name, fn) {
     assert.equal((await get(a.transcriptUrl)).status, 404, 'delete removes the transcript too');
     assert.equal((await get('/transcript/..%2Fserver.js')).status, 404);
   });
+  await check('voice list shows official voices first with an Official badge', async () => {
+    const js = await (await get('/app.js')).text();
+    assert.match(js, /'Official'/);
+    assert.match(js, /function loadOfficialVoices/);
+  });
   await check('library shows a Transcript button only when a transcript was saved', async () => {
     const html = await (await get('/')).text();
     assert.match(html, /id="transcriptDialog"/);
     const js = await (await get('/app.js')).text();
     assert.match(js, /if \(ep\.transcriptUrl\)/);
+  });
+  await check('cover art: the rendered PNG is embedded in the MP3 with title, narrator and album', async () => {
+    const r = await post('/api/audio', { title: 'Cover Test “Ω”', script: 'A story about the sea, long enough to voice.', engine: 's2.1-pro-free', voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: 'Fish Official' });
+    const a = await r.json();
+    const mp3 = path.join(tmp, 'output', a.file);
+    const original = fs.readFileSync(mp3);
+    let ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, true, 'a new episode needs its cover embedded');
+    const c = await post('/api/cover', { file: a.file, png: PNG_1PX });
+    assert.equal(c.status, 200, await c.clone().text());
+    const tagged = fs.readFileSync(mp3);
+    const { frames, audio } = readId3(tagged);
+    assert.ok(audio.equals(original), 'the audio itself is unchanged');
+    assert.equal(id3Text(frames.TIT2), 'Cover Test “Ω”');
+    assert.equal(id3Text(frames.TPE1), 'Sarah');
+    assert.equal(id3Text(frames.TALB), 'Podcast Studio');
+    const apic = frames.APIC;
+    assert.ok(apic.includes(Buffer.from('image/png\0', 'latin1')));
+    assert.ok(apic.includes(Buffer.from(PNG_1PX, 'base64')), 'PNG bytes embedded');
+    ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, false);
+    // Re-embedding replaces the tag instead of stacking a second one.
+    await post('/api/cover', { file: a.file, png: PNG_1PX });
+    assert.ok(readId3(fs.readFileSync(mp3)).audio.equals(original));
+    // The download carries the cover.
+    const dl = Buffer.from(await (await get(`${a.url}?download=1`)).arrayBuffer());
+    assert.ok(readId3(dl).frames.APIC);
+    // A new illustration means the cover must be embedded again.
+    await post('/api/illustrate', { file: a.file });
+    ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, true);
+    // Bad input.
+    assert.equal((await post('/api/cover', { file: a.file, png: Buffer.from('not a png').toString('base64') })).status, 400);
+    assert.equal((await post('/api/cover', { file: '../x.mp3', png: PNG_1PX })).status, 400);
+    assert.equal((await post('/api/cover', { file: 'missing.mp3', png: PNG_1PX })).status, 404);
+    await post('/api/delete', { file: a.file });
+    assert.ok(!fs.existsSync(mp3.replace(/\.mp3$/, '.png')), 'delete removes the cover PNG');
+  });
+  await check('the page renders and uploads covers for episodes that need them', async () => {
+    const js = await (await get('/app.js')).text();
+    assert.match(js, /\/api\/cover/);
+    assert.match(js, /needsCover/);
   });
   await check('player shows the episode art, with a default and a create button', async () => {
     const html = await (await get('/')).text();
@@ -357,6 +441,19 @@ async function check(name, fn) {
     assert.equal((await post('/api/delete', { file: a.file })).status, 404);
     assert.equal((await post('/api/delete', { file: '../server.js' })).status, 400);
     assert.equal((await post('/api/delete', { file: a.file }, { Origin: 'http://evil.example.com' })).status, 403);
+  });
+  await check('footnotes read "Narrated by …" with the voice details', async () => {
+    const js = await (await get('/app.js')).text();
+    const src = js.slice(js.indexOf('function narratorCredit'), js.indexOf('\n}\n', js.indexOf('function narratorCredit')) + 2);
+    const narratorCredit = new Function(`${src}; return narratorCredit;`)();
+    assert.equal(narratorCredit({ voiceId: VOICE_ID, voiceTitle: 'Narrator', voiceAuthor: 'Rogen Darell Aban' }),
+      `Narrated by Rogen Darell Aban (“Narrator” voice, ID ${VOICE_ID})`);
+    assert.equal(narratorCredit({ voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: 'Fish Official' }),
+      `Narrated by Sarah (voice by Fish Official, ID ${SARAH_ID})`);
+    assert.equal(narratorCredit({ voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: null }), `Narrated by Sarah (ID ${SARAH_ID})`);
+    assert.equal(narratorCredit({ voiceId: null, voiceTitle: 'Engine voice' }), 'Narrated by the engine’s own voice');
+    assert.equal(narratorCredit({ voiceId: null, voiceTitle: 'Default voice' }), 'Narrated by the engine’s own voice');
+    assert.ok(!/ by .* by /.test(narratorCredit({ voiceId: VOICE_ID, voiceTitle: 'Narrator', voiceAuthor: 'Rogen Darell Aban' })));
   });
   await check('library and player credit the narrator voice and its author', async () => {
     const js = await (await get('/app.js')).text();

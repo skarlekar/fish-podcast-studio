@@ -64,9 +64,10 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 | **Editable prompts** | Separate system prompt (voice and craft) and user prompt (the story), both editable in the page |
 | **Script review** | Edit the script, preview audio tags inline, ask Claude for revisions, or start over |
 | **Length control** | Pick 1–10 minutes; the app targets about 135 spoken words per minute and asks Claude to correct a draft that misses by more than 15% |
-| **Voices** | A default narrator is pre-selected; search Fish Audio's library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the voice, its creator and its ID |
+| **Voices** | A default narrator is pre-selected. Fish Audio's official voices are listed first with an *Official* badge; search the wider library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the narrator and the voice ID |
 | **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
 | **Story artwork** | Claude draws a cover illustration for each episode from its story, in the series' flat, poster-like style, shown in the player and the library. Older episodes get a *Create illustration* button |
+| **Tagged MP3s** | Every MP3 carries its cover art, title, narrator and album in its ID3 tag, so music players and phones show the picture |
 | **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
 | **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion. *Transcript* shows the exact text Fish Audio voiced, with its audio tags, to read, copy or download |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
@@ -94,7 +95,8 @@ flowchart LR
 2. **Write.** The server sends both to Claude Sonnet (`claude-sonnet-5-5`). It appends fixed rules after your system prompt: the word target for the chosen length, Fish Audio's tag syntax and a strict output format. That way an edited prompt can't break the steps that follow. If the draft is more than 15% off the target length, the server asks Claude for one corrected version. A reply that was cut off (`stop_reason: max_tokens`) is rejected rather than shown.
 3. **Review.** The script appears in an editor with a tag preview. Edit it directly, send feedback for a revision, or start over.
 4. **Voice and illustrate.** On approval, the server sends the script to Fish Audio's text-to-speech API with your chosen engine, voice and speed. At the same time, Claude reads the story and draws a cover as an SVG, using the series' original artwork as a style reference. If the drawing fails, the audio is still saved and the episode keeps the default art. For the legacy `s1` engine, `[bracket]` tags are converted to its `(parenthesis)` set and unsupported ones are dropped. If a long script is rejected as one request, it is retried paragraph by paragraph and the audio joined.
-5. **Listen.** The MP3, the cover SVG, the audio transcript (the exact text sent to Fish Audio, as `.txt`) and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
+5. **Tag.** The browser renders the illustration (or the default art) to a 600×600 PNG, and the server writes it into the MP3's ID3v2.3 tag with the title, narrator (Artist) and "Podcast Studio" (Album). Players only accept PNG or JPEG covers, which is why the SVG is converted first. Older episodes are tagged automatically when the library loads.
+6. **Listen.** The MP3, the cover SVG, the audio transcript (the exact text sent to Fish Audio, as `.txt`) and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
 
 All calls to Claude and Fish Audio are made by the local server; the browser only talks to `localhost`.
 
@@ -162,10 +164,12 @@ Both prompts are edited in the **Brief** panel.
 
 Every episode starts with the **default narrator** selected: Fish Audio's "Sarah" voice by Fish Official (ID `933563129e564b19a115bedd57b7406a`), a soft, conversational narrator. To use a different voice for an episode, pick another in the Production panel; to change the default, set `FISH_VOICE_ID` in `.env`.
 
+The voice list opens with Fish Audio's **official voices** (the ones on [fish.audio/app/default-voices](https://fish.audio/app/default-voices/)), English only, marked *Official*; *Show more official voices* loads the rest. Searches also put official matches first, followed by community voices.
+
 Fish Audio's voice search matches **voice titles only**, not creator names, and many voices share titles such as "Narrator". To find a specific voice:
 
 - **Paste its ID or link** into the search box, e.g. `785ee4188c594830bc2ec7065817c1e1` or `https://fish.audio/m/785ee4188c594830bc2ec7065817c1e1/`.
-- **Copy the ID from your library.** Each episode's footnote shows the voice, its creator and its ID.
+- **Copy the ID from your library.** Each episode's footnote reads like *Narrated by Sarah (voice by Fish Official, ID 9335…)*.
 - **Browse by creator.** Click *More by* on any voice to list that creator's other voices.
 
 *Engine voice* uses no reference voice at all; the engine picks one, and it can change between runs.
@@ -212,7 +216,7 @@ Podcast Studio itself is free; the two APIs it calls are billed by their provide
 npm test
 ```
 
-The test suite starts the real server against mock Claude and Fish Audio endpoints (no keys or network needed). It covers the full write-review-voice flow, prompt handling, truncated replies, error messages, range requests, key handling, and Host and Origin protection.
+The test suite starts the real server against mock Claude and Fish Audio endpoints (no keys or network needed). It covers the full write-review-voice flow, prompt handling, truncated replies, voice lookup and official voices, illustrations and their sanitizing, audio transcripts, MP3 cover tagging, deletion, error messages, range requests, key handling, and Host and Origin protection.
 
 ```
 server.js          Node server: static files, Claude + Fish Audio proxy, keys, audio streaming, library

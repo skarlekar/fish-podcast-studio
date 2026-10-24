@@ -234,7 +234,7 @@ async function writeNarrative({ feedback } = {}) {
     refreshStats();
     setStep('review');
     $('#reviewPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    if (!state.voicesLoaded) searchVoices('narrator', { quiet: true });
+    if (!state.voicesLoaded) loadOfficialVoices({ quiet: true });
   } catch (ex) {
     notice(ex.message);
   } finally {
@@ -320,9 +320,10 @@ function selectVoice(v) {
 }
 
 /** The default narrator and the engine's own voice are always listed first, then the search results. */
-function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
+function renderVoices(items, { showEmpty = true, heading = '', more = null } = {}) {
   const ul = $('#voiceList');
   ul.replaceChildren();
+  state.voiceView = { items, opts: { showEmpty, heading, more } };
 
   const mk = (v, sub) => {
     const li = document.createElement('li');
@@ -332,6 +333,12 @@ function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
     pick.type = 'button';
     pick.className = 'vname';
     pick.textContent = v.title;
+    if (v.official) {
+      const b = document.createElement('span');
+      b.className = 'badge';
+      b.textContent = 'Official';
+      pick.append(' ', b);
+    }
     if (sub) {
       const s = document.createElement('span');
       s.className = 'vsub';
@@ -352,7 +359,7 @@ function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
       });
       li.append(pl);
     }
-    if (v.authorId && v.author) {
+    if (v.authorId && v.author && !v.official) {
       // Fish Audio's search only matches voice titles, so browse a creator's voices by their ID instead.
       const more = document.createElement('button');
       more.type = 'button';
@@ -367,7 +374,9 @@ function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
 
   const id = state.config.defaultVoiceId;
   const def = state.defaultVoice || (id ? { id, title: 'Default narrator', author: null } : null);
-  if (def) ul.append(mk(def, ['Default narrator', def.author].filter(Boolean).join(' · ')));
+  // The Official badge already names Fish Audio, so official voices skip the creator in their subtitle.
+  const byline = (v) => (v.official ? null : v.author);
+  if (def) ul.append(mk(def, ['Default narrator', byline(def)].filter(Boolean).join(' · ')));
   ul.append(mk({ id: '', title: 'Engine voice', author: null }, 'No reference voice: the engine picks one, and it can vary between runs'));
   if (heading) {
     const li = document.createElement('li');
@@ -388,11 +397,40 @@ function renderVoices(items, { showEmpty = true, heading = '' } = {}) {
     li.textContent = 'That is the default narrator, listed first above.';
     ul.append(li);
   }
-  for (const v of others) ul.append(mk(v, [v.author, ...(v.tags || [])].filter(Boolean).join(' · ')));
+  for (const v of others) ul.append(mk(v, [byline(v), ...(v.tags || [])].filter(Boolean).join(' · ')));
+  if (more) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ghost small';
+    b.textContent = 'Show more official voices';
+    b.addEventListener('click', more);
+    li.append(b);
+    ul.append(li);
+  }
+}
+
+/** Fish Audio's official English voices, 24 per page; "Show more" appends the next page. */
+async function loadOfficialVoices({ quiet = false, page = 1 } = {}) {
+  if (!state.config.hasKeys.fish) return renderVoices([], { showEmpty: false });
+  try {
+    const r = await api(`/api/voices?page=${page}`);
+    state.officialVoices = page === 1 ? r.items : [...(state.officialVoices || []), ...r.items];
+    state.voicesLoaded = true;
+    const hasMore = r.items.length > 0 && state.officialVoices.length < r.total;
+    renderVoices(state.officialVoices, {
+      heading: 'Official voices',
+      more: hasMore ? () => loadOfficialVoices({ page: page + 1 }) : null,
+    });
+  } catch (ex) {
+    if (!quiet) notice(ex.message);
+  }
 }
 
 async function searchVoices(q, { quiet = false, author = '', authorName = '' } = {}) {
   if (!state.config.hasKeys.fish) return renderVoices([], { showEmpty: false });
+  if (!q && !author) return loadOfficialVoices({ quiet });
   const btn = $('#voiceBtn');
   setBusy(btn, true, 'Searching…');
   try {
@@ -419,7 +457,8 @@ async function loadDefaultVoice() {
     /* keep the placeholder name */
   }
   if (state.voice.id === id && state.defaultVoice) selectVoice(state.defaultVoice);
-  renderVoices([], { showEmpty: false });
+  const view = state.voiceView || { items: [], opts: { showEmpty: false } };
+  renderVoices(view.items, view.opts);
 }
 $('#voiceBtn').addEventListener('click', () => searchVoices($('#voiceQ').value.trim()));
 $('#voiceQ').addEventListener('keydown', (e) => e.key === 'Enter' && $('#voiceBtn').click());
@@ -454,6 +493,7 @@ $('#approveBtn').addEventListener('click', async () => {
         speed: Number($('#speed').value),
       },
     });
+    await embedCover(ep).catch((err) => console.warn('Cover not embedded:', err));
     loadEpisode(ep, true);
     await refreshLibrary();
     notice('Audio ready — and saved to your output folder.', 'ok', 5000);
@@ -476,11 +516,17 @@ const PLAY_PATH = 'M8 5v14l11-7z';
 const PAUSE_PATH = 'M6 5h4v14H6zM14 5h4v14h-4z';
 const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
 
-/** "Voice: Narrator by Rogen Darell Aban (ID 785e…)" — Fish voice titles are generic, so credit the author and ID too. */
+/**
+ * "Narrated by Sarah (voice by Fish Official, ID 9335…)". Fish voice titles can be generic ("Narrator"),
+ * so then the creator is named as the narrator: "Narrated by Rogen Darell Aban ("Narrator" voice, ID 785e…)".
+ */
 function narratorCredit(ep) {
-  if (!ep.voiceTitle) return '';
-  const who = `Voice: ${ep.voiceTitle}${ep.voiceAuthor ? ` by ${ep.voiceAuthor}` : ''}`;
-  return ep.voiceId ? `${who} (ID ${ep.voiceId})` : who;
+  if (!ep.voiceId) return ep.voiceTitle ? 'Narrated by the engine’s own voice' : '';
+  const title = String(ep.voiceTitle || '').trim();
+  const generic = !title || /^(the )?(narrator|narration|voice|custom voice)$/i.test(title);
+  const name = generic ? ep.voiceAuthor || 'a custom voice' : title;
+  const about = generic ? (title && ep.voiceAuthor ? `“${title}” voice` : '') : ep.voiceAuthor ? `voice by ${ep.voiceAuthor}` : '';
+  return `Narrated by ${name} (${[about, `ID ${ep.voiceId}`].filter(Boolean).join(', ')})`;
 }
 
 function loadEpisode(ep, autoplay) {
@@ -528,6 +574,7 @@ $('#illustrateBtn').addEventListener('click', async () => {
     const ep = await api('/api/illustrate', { body: { file: state.current.file } });
     state.current = { ...state.current, ...ep };
     showCover(state.current);
+    await embedCover(state.current).catch((err) => console.warn('Cover not embedded:', err));
     await refreshLibrary();
     notice('Illustration ready.', 'ok', 4000);
   } catch (ex) {
@@ -576,6 +623,63 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'ArrowLeft') $('#back').click();
   else if (e.code === 'ArrowRight') $('#fwd').click();
 });
+
+// ------------------------------------------------------------ MP3 cover art
+/**
+ * Players only show PNG/JPEG covers, so render the episode's illustration (or the series default) to a
+ * 600×600 PNG with the same label as the player, and have the server embed it in the MP3's ID3 tag.
+ */
+async function renderCoverPng(ep) {
+  const svg = await (await fetch(ep.artUrl || '/default-art.svg')).text();
+  // Some browsers can't draw an SVG without an intrinsic size onto a canvas.
+  const sized = /<svg\b[^>]*\swidth=/i.test(svg) ? svg : svg.replace(/<svg\b/i, '<svg width="600" height="600"');
+  // A data: URL, because the page's Content-Security-Policy allows data: images but not blob: ones.
+  const img = new Image();
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sized)}`;
+  await img.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 600;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, 600, 600);
+  ctx.font = '600 24px system-ui, -apple-system, "Segoe UI", sans-serif';
+  ctx.fillStyle = '#f6dba0';
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '3.8px';
+  ctx.fillText('PODCAST STUDIO', 32, 570);
+  const bytes = new Uint8Array(await (await new Promise((done) => canvas.toBlob(done, 'image/png'))).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function embedCover(ep) {
+  const r = await api('/api/cover', { body: { file: ep.file, png: await renderCoverPng(ep) } });
+  if (state.current && state.current.file === ep.file) {
+    state.current.needsCover = false;
+    // The file on disk changed under the player; reload it and carry on from the same place.
+    const at = audio.currentTime;
+    const playing = !audio.paused;
+    audio.addEventListener('loadedmetadata', () => {
+      audio.currentTime = at;
+      if (playing) audio.play().catch(() => {});
+    }, { once: true });
+    audio.src = `${ep.url}?v=${Date.now()}`;
+  }
+  return r;
+}
+
+/** Older episodes (and any whose illustration changed) get their cover embedded in the background. */
+let embeddingCovers = false;
+async function embedMissingCovers(episodes) {
+  if (embeddingCovers) return;
+  embeddingCovers = true;
+  try {
+    for (const ep of episodes.filter((e) => e.needsCover)) {
+      await embedCover(ep).catch((err) => console.warn(`Cover not embedded for ${ep.file}:`, err));
+    }
+  } finally {
+    embeddingCovers = false;
+  }
+}
 
 // ------------------------------------------------------------ library
 /** Shows the exact text that was sent to Fish Audio (saved next to the MP3 since transcripts were added). */
@@ -651,6 +755,7 @@ async function refreshLibrary() {
   const ul = $('#episodes');
   ul.replaceChildren();
   $('#libraryPanel').hidden = eps.length === 0;
+  embedMissingCovers(eps);
   for (const ep of eps) {
     const li = document.createElement('li');
     li.dataset.file = ep.file;

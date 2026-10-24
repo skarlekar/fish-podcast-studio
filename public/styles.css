@@ -124,6 +124,7 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .voices li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); }
 .voices li.sel { border-color: var(--amber); background: var(--amber-soft); }
 .voices .vname { flex: 1; min-width: 0; text-align: left; background: none; border: 0; color: var(--text); padding: 0; font-weight: 600; font-size: 0.86rem; white-space: normal; display: block; }
+.voices .badge { display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.04em; vertical-align: 1px; }
 .voices .vsub { display: block; font-weight: 400; font-size: 0.74rem; color: var(--muted); }
 .voices .vplay { padding: 4px 9px; font-size: 0.72rem; }
 .voices .empty { color: var(--muted); font-size: 0.82rem; border: 0; background: none; padding: 4px 0; }
