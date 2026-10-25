@@ -327,9 +327,33 @@ function id3Frame(id, data) {
 // Encoding 1 = UTF-16 with BOM, so titles keep curly quotes and non-Latin letters.
 const id3Text = (id, text) => id3Frame(id, Buffer.concat([Buffer.from([1, 0xff, 0xfe]), Buffer.from(String(text), 'utf16le')]));
 
-function buildId3({ title, artist, album, png }) {
+/** Plain narration for the file's lyrics field (Apple Music's Lyrics button): audio tags removed, paragraph breaks kept. */
+function lyricsOf(text) {
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((p) => p
+      .replace(/\[[^\]]*\]/g, ' ')
+      .replace(/\(([^()]*)\)/g, (m, t) => (S1_TAGS.has(t.trim().toLowerCase()) ? ' ' : m)) // S1-style (sighing) tags
+      .replace(/\s+/g, ' ')
+      .trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/** The episode's lyrics: the saved transcript is exactly what was voiced; very old episodes fall back to the script. */
+async function episodeLyrics(meta) {
+  const spoken = meta.transcript ? await fsp.readFile(path.join(OUTPUT_DIR, path.basename(meta.transcript)), 'utf8').catch(() => meta.script || '') : meta.script || '';
+  return lyricsOf(spoken);
+}
+
+// USLT = unsynchronised lyrics: UTF-16 text, language, empty descriptor, then the text.
+const BOM = Buffer.from([0xff, 0xfe]);
+const id3Lyrics = (text) => id3Frame('USLT', Buffer.concat([Buffer.from([1]), Buffer.from('eng', 'latin1'), BOM, Buffer.from([0, 0]), BOM, Buffer.from(text, 'utf16le')]));
+
+function buildId3({ title, artist, album, png, lyrics }) {
   const apic = Buffer.concat([Buffer.from([0]), Buffer.from('image/png\0', 'latin1'), Buffer.from([3, 0]), png]); // 3 = front cover
-  const body = Buffer.concat([id3Text('TIT2', title), ...(artist ? [id3Text('TPE1', artist)] : []), id3Text('TALB', album), id3Frame('APIC', apic)]);
+  const body = Buffer.concat([id3Text('TIT2', title), ...(artist ? [id3Text('TPE1', artist)] : []), id3Text('TALB', album), id3Frame('APIC', apic), ...(lyrics ? [id3Lyrics(lyrics)] : [])]);
   const n = body.length; // the tag size is "synchsafe": 7 bits per byte
   return Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, (n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f]), body]);
 }
@@ -367,11 +391,12 @@ async function handleCover(body) {
   } catch {
     throw new HttpError(404, 'That episode no longer exists.');
   }
-  const tag = buildId3({ title: meta.title || 'Untitled Episode', artist: narratorName(meta), album: 'Podcast Studio', png });
+  const tag = buildId3({ title: meta.title || 'Untitled Episode', artist: narratorName(meta), album: 'Podcast Studio', png, lyrics: await episodeLyrics(meta) });
   const tagged = Buffer.concat([tag, audio.subarray(id3Length(audio))]);
   await fsp.writeFile(`${mp3}.tmp`, tagged);
   await fsp.rename(`${mp3}.tmp`, mp3); // atomic: a reader sees the old file or the new one, never half of each
   meta.coverOf = coverWanted(meta);
+  meta.lyricsIn = true;
   meta.bytes = tagged.length;
   await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2));
   return { file, needsCover: false, bytes: tagged.length };
@@ -626,7 +651,7 @@ async function listEpisodes() {
           url: `/audio/${encodeURIComponent(meta.file)}`,
           artUrl: artUrl(meta.art),
           transcriptUrl: transcriptUrl(meta.transcript),
-          needsCover: meta.coverOf !== coverWanted(meta),
+          needsCover: meta.coverOf !== coverWanted(meta) || !meta.lyricsIn,
         });
       }
     } catch {
@@ -863,9 +888,11 @@ async function ensureM4a(mp3Name) {
   }
   if (!m4aJobs.has(m4a)) {
     const part = `${m4a}.part`;
+    // ffmpeg reads the MP3's lyrics as "lyrics-eng", which the MP4 writer ignores, so pass them under the key it knows (©lyr).
+    const lyrics = await fsp.readFile(mp3.replace(/\.mp3$/, '.json'), 'utf8').then((j) => episodeLyrics(JSON.parse(j))).catch(() => '');
     const run = (args) => new Promise((resolve, reject) => execFile(FFMPEG, args, { timeout: 180_000 }, (err) => (err ? reject(err) : resolve())));
     const head = ['-loglevel', 'error', '-y', '-i', mp3];
-    const tail = ['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-f', 'ipod', part];
+    const tail = [...(lyrics ? ['-metadata', `lyrics=${lyrics}`] : []), '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-f', 'ipod', part];
     // Title/artist/album and the cover picture travel with the file. If the MP3 has no cover, or the cover cannot
     // be carried, retry audio-only so the download still works.
     const job = run([...head, '-map', '0:a', '-map', '0:v?', '-map_metadata', '0', '-c:v', 'copy', '-disposition:v:0', 'attached_pic', ...tail])

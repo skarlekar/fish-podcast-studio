@@ -114,7 +114,7 @@ async function check(name, fn) {
   fs.mkdirSync(samplesDir);
   fs.writeFileSync(path.join(samplesDir, 'sample-one.mp3'), Buffer.alloc(2000, 1));
   fs.writeFileSync(path.join(samplesDir, 'sample-one.txt'), '[calm] A sample.');
-  fs.writeFileSync(path.join(samplesDir, 'sample-one.json'), JSON.stringify({ file: 'sample-one.mp3', title: 'Sample One', createdAt: '2026-01-01T00:00:00.000Z', engine: 's2.1-pro-free', transcript: 'sample-one.txt', script: '[calm] A sample.', coverOf: 'default', bytes: 2000 }));
+  fs.writeFileSync(path.join(samplesDir, 'sample-one.json'), JSON.stringify({ file: 'sample-one.mp3', title: 'Sample One', createdAt: '2026-01-01T00:00:00.000Z', engine: 's2.1-pro-free', transcript: 'sample-one.txt', script: '[calm] A sample.', coverOf: 'default', lyricsIn: true, bytes: 2000 }));
 
   const startServer = (p) => {
     const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
@@ -174,6 +174,9 @@ async function check(name, fn) {
       const mp3 = fs.readFileSync(path.join(dir, m.file));
       assert.equal(mp3.subarray(0, 3).toString('latin1'), 'ID3', `${m.file}: cover tag embedded`);
       assert.equal(m.coverOf, m.art || 'default', `${n}: embedded cover matches`);
+      assert.equal(m.lyricsIn, true, `${n}: lyrics flagged as embedded`);
+      const lyrics = readId3(mp3).frames.USLT;
+      assert.ok(lyrics && !/\[[^\]]*\]/.test(lyrics.subarray(10).toString('utf16le')), `${m.file}: lyrics embedded and free of audio tags`);
       assert.ok(m.transcript && fs.existsSync(path.join(dir, m.transcript)), `${n}: transcript present`);
       if (m.art) assert.ok(fs.existsSync(path.join(dir, m.art)), `${n}: illustration present`);
     }
@@ -407,6 +410,44 @@ async function check(name, fn) {
     assert.equal((await post('/api/cover', { file: 'missing.mp3', png: PNG_1PX })).status, 404);
     await post('/api/delete', { file: a.file });
     assert.ok(!fs.existsSync(mp3.replace(/\.mp3$/, '.png')), 'delete removes the cover PNG');
+  });
+  await check('lyrics: the narration, without audio tags, is embedded for Apple Music in the MP3 and the .m4a', async () => {
+    const script = '[calm] First line of the story. [long-break]\n\n[whispering] Second paragraph, “quoted”. (sighing) The end.';
+    const expected = 'First line of the story.\n\nSecond paragraph, “quoted”. The end.';
+    const a = await (await post('/api/audio', { title: 'Lyrics Test', script, engine: 's2.1-pro-free' })).json();
+    const mp3 = path.join(tmp, 'output', a.file);
+    // An episode made before lyrics existed must ask the browser to tag it again.
+    let ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, true);
+    assert.equal((await post('/api/cover', { file: a.file, png: PNG_1PX })).status, 200);
+    const uslt = readId3(fs.readFileSync(mp3)).frames.USLT;
+    assert.ok(uslt, 'USLT (lyrics) frame present');
+    assert.equal(uslt[0], 1, 'UTF-16 with BOM');
+    assert.equal(uslt.subarray(1, 4).toString('latin1'), 'eng');
+    assert.equal(uslt.subarray(10).toString('utf16le'), expected, 'plain narration, no [tags], paragraphs kept'); // 1 + 3 + (BOM + 00 00) + BOM
+    ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, false, 'tagged once, not asked again');
+    // An episode whose cover is current but that was tagged before lyrics existed is tagged again.
+    const metaPath = mp3.replace(/\.mp3$/, '.json');
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    delete meta.lyricsIn;
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+    ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === a.file);
+    assert.equal(ep.needsCover, true, 'older tagged episode asks for a re-tag');
+    assert.equal((await post('/api/cover', { file: a.file, png: PNG_1PX })).status, 200);
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) return console.log('    (.m4a part skipped: ffmpeg not installed)');
+    // The .m4a is converted from the MP3, so the lyrics must survive the conversion.
+    const real = path.join(tmp, 'lyrics-fixture.mp3');
+    assert.equal(spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:a', 'libmp3lame', '-b:a', '64k', real]).status, 0);
+    fs.copyFileSync(real, mp3);
+    assert.equal((await post('/api/cover', { file: a.file, png: PNG_1PX })).status, 200);
+    const m4a = path.join(tmp, 'output', a.file.replace(/\.mp3$/, '.m4a'));
+    const r = await get(`/audio/${a.file.replace(/\.mp3$/, '.m4a')}?download=1`);
+    assert.equal(r.status, 200, await r.clone().text());
+    await r.arrayBuffer();
+    const probe = JSON.parse(String(spawnSync('ffprobe', ['-v', 'error', '-of', 'json', '-show_format', m4a]).stdout));
+    assert.equal(probe.format.tags.lyrics, expected, 'm4a carries the lyrics (©lyr)');
+    await post('/api/delete', { file: a.file });
   });
   await check('the page renders and uploads covers for episodes that need them', async () => {
     const js = await (await get('/app.js')).text();

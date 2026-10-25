@@ -67,7 +67,7 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 | **Voices** | A default narrator is pre-selected. Fish Audio's official voices are listed first with an *Official* badge; search the wider library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the narrator and the voice ID |
 | **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
 | **Story artwork** | Claude draws a cover illustration for each episode from its story, in the series' flat, poster-like style, shown in the player and the library. Older episodes get a *Create illustration* button |
-| **Tagged MP3s** | Every MP3 carries its cover art, title, narrator and album in its ID3 tag, so music players and phones show the picture |
+| **Tagged MP3s** | Every MP3 carries its cover art, title, narrator, album and the narration text (without audio tags) as lyrics in its ID3 tag, so music players and phones show the picture, and Apple Music's *Lyrics* button shows the story |
 | **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
 | **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion. *Transcript* shows the exact text Fish Audio voiced, with its audio tags, to read, copy or download |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
