@@ -67,3 +67,21 @@ Starting design notes (my analysis, not decisions; confirm with the user):
 - The user's library (`output/`) has "The Orange Cord" (Adrian) and "The Long Climb to the Clouds" (Rogen Darell Aban), the same two episodes as `samples/`.
 
 - iPhone sharing: Messages cannot play `.mp3` attachments (same file plays via AirDrop/WhatsApp; verified on iPhone 13 Pro Max + iPhone 18 Pro Max, incl. a tag-free file), but plays AAC. `GET /audio/<episode>.m4a` converts on demand with ffmpeg (needs ffmpeg; 501 with install hint otherwise), caches `<episode>.m4a` beside the MP3, and is removed on delete. Downloads (`?download=1`) always ignore Range so iOS never saves a partial file. The .m4a carries the title/artist tags and cover art (verified: plays in Messages on iPhone and in Apple Music/QuickTime on Mac). ffmpeg is installed in the Docker image (`apk add ffmpeg`); a brew-installed ffmpeg only helps `./start.sh`, not the container. Ruled out: MP3 stream inside an MP4 container (Apple players won't open it); `afconvert` was never needed. The .m4a cache has no version invalidation: delete `output/*.m4a` after changing the ffmpeg arguments. Lyrics: the MP3 carries the narration without `[audio tags]` in an ID3 `USLT` frame (`lyricsOf`/`episodeLyrics`), set whenever the cover is embedded; `meta.lyricsIn` marks episodes tagged that way and older ones report `needsCover` so the browser re-tags them on next load. ffmpeg reads USLT as `lyrics-eng`, which the MP4 writer drops, so `ensureM4a` passes `-metadata lyrics=` explicitly (becomes `©lyr`). The two repo samples were re-tagged with lyrics. Verified by the user: Apple Music's Lyrics button shows them. `<a download>` saves any response, so the client fetches first and never saves an error body as a file.
+
+## Status (end of second session, 2026-10-25)
+Shipped and verified by the user on their Mac and iPhone (a cloud chat did this work, not the terminal; see "Gotchas"):
+- **Download for iPhone** (`.m4a`): library link + player button. `GET /audio/<ep>.m4a` converts the MP3 on demand with ffmpeg (AAC 128k, title/artist/album, cover art, lyrics), caches it beside the MP3 and removes it on delete. Plays in Messages on iPhone and in Apple Music/QuickTime on the Mac. See the "iPhone sharing" bullet above for the details and the routes that were ruled out.
+- **Lyrics**: the MP3 and `.m4a` carry the narration without `[audio tags]`, so Apple Music's Lyrics button shows the story. Episodes tagged before this report `needsCover: true` and the browser re-tags them on next page load; the two repo samples were re-tagged.
+- **ffmpeg**: installed in the Docker image (`apk add ffmpeg`). Without it the app still runs; the iPhone button is dimmed and `/api/config` says `m4a: false`. With `./start.sh` it needs `brew install ffmpeg`.
+- Tests: `npm test`, 41 checks pass. The `.m4a` and lyrics checks need ffmpeg and skip themselves without it.
+- README: Features table mentions lyrics; a footnote explains Download for iPhone.
+- Git: work is committed up to `3ee445e`; the user pushes from their own terminal.
+
+Open items: only "Things to do" above (two-speaker mode is still the next feature; run the brainstorming step first). Nothing is half-done.
+
+### Gotchas learned
+- A cloud chat has no GitHub credentials, so it cannot `git push` or create repos; use this terminal session or the user's own terminal for that.
+- A cached `output/<ep>.m4a` is reused while it is newer than its MP3. After changing the ffmpeg arguments, delete `output/*.m4a`.
+- ffmpeg reads ID3 lyrics as `lyrics-eng`, which its MP4 writer drops; `ensureM4a` passes `-metadata lyrics=` instead.
+- `<a download>` saves whatever the server returns, including an error body (this once produced a 159-byte fake `.m4a`); the client fetches first and only saves a real response.
+- The user prefers verified claims: say what was tested and what only they can test (Messages, Apple Music).
