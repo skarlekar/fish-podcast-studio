@@ -529,6 +529,53 @@ function narratorCredit(ep) {
   return `Narrated by ${name} (${[about, `ID ${ep.voiceId}`].filter(Boolean).join(', ')})`;
 }
 
+/**
+ * Fetch first, then save: a plain download link would save an error reply (for example "needs ffmpeg") as if it
+ * were the audio file. Here an error is shown on screen and no file is created.
+ */
+async function saveFile(url, filename, link) {
+  const label = link.textContent;
+  link.textContent = 'Preparing…';
+  link.setAttribute('aria-disabled', 'true');
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Download failed (${res.status}).`);
+    }
+    const href = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 15000);
+    notice('Saved ' + filename + ' to your Downloads folder.', 'ok', 5000);
+  } catch (ex) {
+    notice(ex.message);
+  } finally {
+    link.textContent = label;
+    link.removeAttribute('aria-disabled');
+  }
+}
+
+/** The iPhone-friendly .m4a download (Messages can't play MP3 attachments, but it plays this AAC copy). */
+function wireIphoneDownload(link, ep) {
+  const url = `${ep.url.replace(/\.mp3$/, '.m4a')}?download=1`;
+  const name = ep.file.replace(/\.mp3$/, '.m4a');
+  link.href = url;
+  link.classList.toggle('unavailable', state.config?.m4a === false);
+  link.title = state.config?.m4a === false
+    ? 'Needs ffmpeg — install it (macOS: brew install ffmpeg), restart the app and reload this page'
+    : 'AAC version with cover art — plays when sent through Messages';
+  link.onclick = (e) => {
+    e.preventDefault();
+    if (link.getAttribute('aria-disabled')) return;
+    saveFile(url, name, link);
+  };
+}
+
 function loadEpisode(ep, autoplay) {
   state.current = ep;
   $('#playerPanel').hidden = false;
@@ -540,6 +587,7 @@ function loadEpisode(ep, autoplay) {
   $('#rate').textContent = '1×';
   $('#download').href = `${ep.url}${ep.url.includes('?') ? '&' : '?'}download=1`;
   $('#download').setAttribute('download', ep.file);
+  wireIphoneDownload($('#downloadIphone'), ep);
   $('#savedTo').textContent = ep.savedTo ? `Saved to ${ep.savedTo}` : `output/${ep.file}`;
   showCover(ep);
 
@@ -788,6 +836,10 @@ async function refreshLibrary() {
     dl.textContent = 'Download';
     dl.href = `${ep.url}?download=1`;
     dl.setAttribute('download', ep.file);
+    const dlPhone = document.createElement('a');
+    dlPhone.className = 'ghost btn';
+    dlPhone.textContent = 'Download for iPhone';
+    wireIphoneDownload(dlPhone, ep);
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'ghost danger';
@@ -803,7 +855,7 @@ async function refreshLibrary() {
       tr.addEventListener('click', () => showTranscript(ep));
       act.append(tr);
     }
-    act.append(dl, del);
+    act.append(dl, dlPhone, del);
     li.append(thumb, t, s, act);
     ul.append(li);
   }

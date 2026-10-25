@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 
 const CLAUDE_KEY = 'sk-ant-test-0123456789';
@@ -458,6 +458,9 @@ async function check(name, fn) {
     assert.equal((await get(episode.url, { Range: 'bytes=-5' })).status, 206);
     assert.equal((await get(episode.url, { Range: 'bytes=99999999-' })).status, 416);
     assert.match((await get(`${episode.url}?download=1`)).headers.get('content-disposition'), /attachment/);
+    const dl = await get(`${episode.url}?download=1`, { Range: 'bytes=0-1' });
+    assert.equal(dl.status, 200, 'downloads ignore Range so iOS never saves a partial file');
+    assert.equal((await dl.arrayBuffer()).byteLength, total);
     assert.equal((await get('/audio/..%2Fserver.js')).status, 404);
     assert.equal((await get('/audio/..%2F..%2Fetc%2Fpasswd.mp3')).status, 404);
   });
@@ -516,6 +519,59 @@ async function check(name, fn) {
     for (const p of ['/api/config', '/api/episodes', '/', '/app.js']) {
       const t = await (await get(p)).text();
       assert.ok(!t.includes(CLAUDE_KEY) && !t.includes(FISH_KEY), p);
+    }
+  });
+
+  const haveFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
+  await check('iPhone download: /audio/<name>.m4a serves AAC with title and cover art (Messages plays AAC, not MP3)', async () => {
+    if (!haveFfmpeg) return console.log('    (skipped: ffmpeg not installed)');
+    const out = path.join(tmp, 'output');
+    fs.mkdirSync(out, { recursive: true });
+    const png = path.join(out, 'cover-fixture.png');
+    assert.equal(spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=orange:s=64x64', '-frames:v', '1', png]).status, 0);
+    const src = path.join(out, 'iphone-test.mp3');
+    const made = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=2', '-i', png, '-map', '0:a', '-map', '1:v',
+      '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '1', '-b:a', '128k', '-c:v', 'png', '-id3v2_version', '3',
+      '-metadata', 'title=Test Episode', '-metadata', 'artist=Podcast Studio', '-metadata', 'album=Podcast Studio', '-disposition:v', 'attached_pic', src]);
+    assert.equal(made.status, 0, 'fixture mp3 with cover art created: ' + made.stderr);
+    assert.equal((await (await get('/api/config')).json()).m4a, true, 'config reports that .m4a conversion is available');
+    const r = await get('/audio/iphone-test.m4a?download=1');
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'audio/mp4');
+    assert.match(r.headers.get('content-disposition'), /attachment; filename="iphone-test\.m4a"/);
+    const buf = Buffer.from(await r.arrayBuffer());
+    assert.equal(buf.subarray(4, 8).toString('latin1'), 'ftyp', 'MP4 container');
+    const probe = JSON.parse(String(spawnSync('ffprobe', ['-v', 'error', '-of', 'json', '-show_streams', '-show_format', path.join(out, 'iphone-test.m4a')]).stdout));
+    assert.equal(probe.streams.find((s) => s.codec_type === 'audio').codec_name, 'aac');
+    const pic = probe.streams.find((s) => s.codec_type === 'video');
+    assert.ok(pic && ['png', 'mjpeg'].includes(pic.codec_name) && pic.disposition.attached_pic === 1, 'cover art embedded as attached picture');
+    assert.equal(probe.format.tags.title, 'Test Episode');
+    assert.equal(probe.format.tags.artist, 'Podcast Studio');
+    const again = await get('/audio/iphone-test.m4a?download=1', { Range: 'bytes=0-1' });
+    assert.equal(again.status, 200, 'downloads ignore Range');
+    assert.equal((await again.arrayBuffer()).byteLength, buf.length, 'second request served whole from the cached copy');
+    assert.equal((await get('/audio/missing-episode.m4a?download=1')).status, 404);
+    assert.equal((await get('/audio/..%2Fserver.m4a')).status, 404);
+  });
+  await check('without ffmpeg: config says so and the .m4a route answers with a JSON error, never audio', async () => {
+    const out = path.join(tmp, 'output');
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, 'nocache.mp3'), Buffer.concat([Buffer.from('ID3'), Buffer.alloc(4000, 7)]));
+    const port2 = port + 100;
+    const c2 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: { PATH: process.env.PATH, PORT: String(port2), OUTPUT_DIR: out, ENV_FILE: envFile, ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '', FFMPEG_PATH: '/no/such/ffmpeg' },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    await new Promise((resolve, reject) => { c2.stdout.on('data', (d) => /running at/.test(String(d)) && resolve()); c2.on('exit', reject); });
+    try {
+      assert.equal((await (await fetch(`http://127.0.0.1:${port2}/api/config`)).json()).m4a, false);
+      const r = await fetch(`http://127.0.0.1:${port2}/audio/nocache.m4a?download=1`);
+      assert.equal(r.status, 501);
+      assert.match(r.headers.get('content-type'), /json/);
+      assert.equal(r.headers.get('content-disposition'), null, 'an error is never offered as a file download');
+      assert.match((await r.json()).error, /ffmpeg/);
+    } finally {
+      c2.kill();
     }
   });
 

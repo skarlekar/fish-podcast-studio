@@ -2,6 +2,9 @@
 # Keys and episodes are NOT baked in: start-docker.sh mounts ./.env and ./output from the host.
 FROM node:22-alpine
 
+# ffmpeg makes the iPhone-friendly .m4a downloads (AAC with cover art). The app still runs without it; that button is just dimmed.
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 COPY package.json server.js ./
 COPY public ./public

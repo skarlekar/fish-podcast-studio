@@ -72,6 +72,8 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 | **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion. *Transcript* shows the exact text Fish Audio voiced, with its audio tags, to read, copy or download |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
 
+<sub>**Download for iPhone:** iPhone's Messages app can't play MP3 attachments, so each episode also has a *Download for iPhone* button that saves an AAC `.m4a` with the same cover art and tags. It needs [ffmpeg](https://ffmpeg.org): the Docker image includes it, and with `./start.sh` install it first (macOS: `brew install ffmpeg`). Without ffmpeg the button is dimmed and everything else still works.</sub>
+
 ![The player and episode library](docs/player.png)
 
 ## How it works

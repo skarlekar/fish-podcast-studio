@@ -205,3 +205,5 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
   html { scroll-behavior: auto; }
   .progress .bar i { animation: none; width: 60%; }
 }
+
+.btn.unavailable { opacity: 0.55; }

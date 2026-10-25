@@ -11,6 +11,7 @@
  */
 
 const http = require('node:http');
+const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -666,6 +667,7 @@ async function handleDelete(body) {
   await fsp.unlink(mp3.replace(/\.mp3$/, '.json')).catch(() => {});
   await fsp.unlink(mp3.replace(/\.mp3$/, '.svg')).catch(() => {});
   await fsp.unlink(mp3.replace(/\.mp3$/, '.txt')).catch(() => {});
+  await fsp.unlink(mp3.replace(/\.mp3$/, '.m4a')).catch(() => {});
   return { deleted: file };
 }
 
@@ -831,8 +833,60 @@ function serveArt(res, name) {
   res.end(body);
 }
 
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const m4aJobs = new Map();
+
+/** True when ffmpeg can be run (needed only for the iPhone .m4a download). */
+function hasFfmpeg() {
+  return new Promise((resolve) => execFile(FFMPEG, ['-version'], { timeout: 5000 }, (err) => resolve(!err)));
+}
+
+/**
+ * AAC (.m4a) copy of an episode, made on demand with ffmpeg and cached next to the MP3.
+ * Why: iPhones will not play an .mp3 that arrives through Messages (the same file plays fine over AirDrop or
+ * WhatsApp), but they do play AAC, so this is the format to share to an iPhone. Returns the .m4a path.
+ */
+async function ensureM4a(mp3Name) {
+  const mp3 = path.join(OUTPUT_DIR, mp3Name);
+  const m4a = mp3.replace(/\.mp3$/, '.m4a');
+  let src;
+  try {
+    src = await fsp.stat(mp3);
+  } catch {
+    throw new HttpError(404, 'Not found');
+  }
+  try {
+    const have = await fsp.stat(m4a);
+    if (have.size > 1000 && have.mtimeMs >= src.mtimeMs) return m4a;
+  } catch {
+    /* not made yet */
+  }
+  if (!m4aJobs.has(m4a)) {
+    const part = `${m4a}.part`;
+    const run = (args) => new Promise((resolve, reject) => execFile(FFMPEG, args, { timeout: 180_000 }, (err) => (err ? reject(err) : resolve())));
+    const head = ['-loglevel', 'error', '-y', '-i', mp3];
+    const tail = ['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-f', 'ipod', part];
+    // Title/artist/album and the cover picture travel with the file. If the MP3 has no cover, or the cover cannot
+    // be carried, retry audio-only so the download still works.
+    const job = run([...head, '-map', '0:a', '-map', '0:v?', '-map_metadata', '0', '-c:v', 'copy', '-disposition:v:0', 'attached_pic', ...tail])
+      .catch((err) => (err.code === 'ENOENT' ? Promise.reject(err) : run([...head, '-vn', '-map_metadata', '0', ...tail])))
+      .then(() => fsp.rename(part, m4a))
+      .catch(async (err) => {
+        await fsp.unlink(part).catch(() => {});
+        if (err.code === 'ENOENT') {
+          throw new HttpError(501, 'Making an iPhone-friendly (.m4a) copy needs ffmpeg. Install it (macOS: brew install ffmpeg) and try again, or share the MP3 by AirDrop or WhatsApp.');
+        }
+        throw new HttpError(500, 'Could not convert this episode to .m4a.');
+      })
+      .finally(() => m4aJobs.delete(m4a));
+    m4aJobs.set(m4a, job);
+  }
+  await m4aJobs.get(m4a);
+  return m4a;
+}
+
 function serveAudio(req, res, name, download) {
-  if (!/^[A-Za-z0-9._-]+\.mp3$/.test(name)) return sendJson(res, 404, { error: 'Not found' });
+  if (!/^[A-Za-z0-9._-]+\.(mp3|m4a)$/.test(name)) return sendJson(res, 404, { error: 'Not found' });
   const file = path.join(OUTPUT_DIR, name);
   let st;
   try {
@@ -840,9 +894,11 @@ function serveAudio(req, res, name, download) {
   } catch {
     return sendJson(res, 404, { error: 'Not found' });
   }
-  const headers = { 'Content-Type': 'audio/mpeg', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
-  if (download) headers['Content-Disposition'] = `attachment; filename="${name}"`;
-  const range = req.headers.range;
+  const headers = { 'Content-Type': name.endsWith('.m4a') ? 'audio/mp4' : 'audio/mpeg', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
+  if (download) headers['Content-Disposition'] = `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  // A download must always be the whole file: iOS Safari sends Range probes on audio links, and a 206 partial
+  // answer there is saved as a truncated, unplayable file. Ranges are only for in-page playback and seeking.
+  const range = download ? undefined : req.headers.range;
   if (range) {
     const m = /^bytes=(\d*)-(\d*)$/.exec(range);
     let start;
@@ -890,12 +946,16 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
         return res.end(req.method === 'HEAD' ? undefined : data);
       }
-      if (p === '/api/config') return sendJson(res, 200, configPayload());
+      if (p === '/api/config') return sendJson(res, 200, { ...configPayload(), m4a: await hasFfmpeg() });
       if (p === '/api/episodes') return sendJson(res, 200, { episodes: await listEpisodes() });
       if (p === '/api/voices') return sendJson(res, 200, await handleVoices(url));
       if (p.startsWith('/art/')) return serveArt(res, decodeURIComponent(p.slice(5)));
       if (p.startsWith('/transcript/')) return serveTranscript(res, decodeURIComponent(p.slice(12)), url.searchParams.get('download') === '1');
-      if (p.startsWith('/audio/')) return serveAudio(req, res, decodeURIComponent(p.slice(7)), url.searchParams.get('download') === '1');
+      if (p.startsWith('/audio/')) {
+        const audioName = decodeURIComponent(p.slice(7));
+        if (/^[A-Za-z0-9._-]+\.m4a$/.test(audioName)) await ensureM4a(audioName.replace(/\.m4a$/, '.mp3'));
+        return serveAudio(req, res, audioName, url.searchParams.get('download') === '1');
+      }
       return sendJson(res, 404, { error: 'Not found' });
     }
 
@@ -929,7 +989,8 @@ server.listen(PORT, HOST, () => {
   console.log(`\n  Podcast Studio running at ${shown}`);
   console.log(`  Claude:      ${CLAUDE_MODEL} (${keys.anthropic ? 'key loaded' : 'no key — the app will ask for it'})`);
   console.log(`  Fish Audio:  ${DEFAULT_ENGINE} (${keys.fish ? 'key loaded' : 'no key — the app will ask for it'})`);
-  console.log(`  Audio saved to: ${OUTPUT_DIR}\n`);
+  console.log(`  Audio saved to: ${OUTPUT_DIR}`);
+  hasFfmpeg().then((ok) => console.log(ok ? '  iPhone .m4a:  ready (ffmpeg found)\n' : '  iPhone .m4a:  OFF — install ffmpeg to turn it on (macOS: brew install ffmpeg)\n'));
 });
 
 module.exports = { server };
