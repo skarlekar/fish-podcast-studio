@@ -1,6 +1,6 @@
 # Podcast Studio
 
-**Turn a story idea into a produced, documentary-style audio episode — written by Claude, voiced by Fish Audio, reviewed by you.**
+**Turn a story into a produced audio episode — a documentary-style audio summary or a two-host podcast — written by Claude, voiced by Fish Audio, reviewed by you.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Node.js 18+](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
@@ -9,7 +9,12 @@
 
 ![The brief: editable system and user prompts](docs/brief.png)
 
-Podcast Studio is a small, self-hosted web app. You describe a story; Claude writes it as a National Geographic-style nature-documentary voice-over, complete with expressive delivery cues; you review and edit the script; Fish Audio performs it while Claude draws cover art from the story; and you listen in a podcast-style player, with every episode saved as an MP3.
+Podcast Studio is a small, self-hosted web app with two studios, one per tab:
+
+- **Audio Summary** — Claude writes your story as a National Geographic-style nature-documentary voice-over for a single narrator.
+- **Podcast** — Claude turns the story into a conversation between a male and a female host who banter and debate their way through it, then leave the listener with takeaways and a question to ponder.
+
+Either way, you review and edit the script, Fish Audio performs it while Claude draws cover art from the story, and you listen in a podcast-style player, with every episode saved as an MP3.
 
 ---
 
@@ -22,6 +27,7 @@ Podcast Studio is a small, self-hosted web app. You describe a story; Claude wri
 - [Quick start](#quick-start)
 - [Run with Docker](#run-with-docker)
 - [Configuration](#configuration)
+- [Podcast mode](#podcast-mode)
 - [Prompts](#prompts)
 - [Voices](#voices)
 - [Audio engines](#audio-engines)
@@ -48,11 +54,12 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 - Drafting a pilot episode or a narrated segment before committing to a studio recording
 - Short educational or travel audio about a place, a natural phenomenon or a historical moment
 - Comparing Fish Audio engines and voices on the same script
+- Turning a story you've written (or an audio summary you've made) into a lively two-host podcast episode
 - Experimenting with narration prompts, and hearing the result within minutes
 
 **Not designed for:**
 
-- Multi-speaker shows, interviews or dialogue (one narrator per episode)
+- Shows with more than two voices, guests or interviews (one narrator, or two hosts)
 - Music, sound effects or full audio mixing
 - High-volume, unattended batch production
 - Hosting for other people: the server is deliberately localhost-only and has no user accounts
@@ -61,14 +68,17 @@ Writing narration and voicing it are different crafts, and most text-to-speech t
 
 | | |
 | --- | --- |
+| **Two studios** | *Audio Summary* (one narrator) and *Podcast* (a male and a female host) tabs, each with its own prompts, drafts and library |
 | **Editable prompts** | Separate system prompt (voice and craft) and user prompt (the story), both editable in the page |
 | **Script review** | Edit the script, preview audio tags inline, ask Claude for revisions, or start over |
 | **Length control** | Pick 1–10 minutes; the app targets about 135 spoken words per minute and asks Claude to correct a draft that misses by more than 15% |
+| **Two-host podcasts** | Hosts open by saying what the episode is about, banter and genuinely disagree through the story, agree on takeaways and leave a question for the listener. Host names and voices are yours to change |
 | **Voices** | A default narrator is pre-selected. Fish Audio's official voices are listed first with an *Official* badge; search the wider library by title, paste a voice ID or fish.audio link, or browse a creator's voices. Each episode credits the narrator and the voice ID |
 | **Audio engines** | `s2.1-pro-free` by default; `s2.1-pro`, `s2-pro`, `drama-3` and `s1` selectable |
 | **Story artwork** | Claude draws a cover illustration for each episode from its story, in the series' flat, poster-like style, shown in the player and the library. Older episodes get a *Create illustration* button |
 | **Tagged MP3s** | Every MP3 carries its cover art, title, narrator, album and the narration text (without audio tags) as lyrics in its ID3 tag, so music players and phones show the picture, and Apple Music's *Lyrics* button shows the story |
 | **Podcast player** | Play/pause, ±15/30 s, seek, playback speed, transcript, keyboard shortcuts, MP3 download |
+| **Voicing footnote** | Under the player and in each library row: the engine and the exact settings sent to Fish Audio (temperature, top-p, speed, latency, MP3 bitrate, number of requests). Fish Audio's TTS API has no top-k setting |
 | **Library** | Every episode is saved to `output/` with its script and settings, listed for replay, download or deletion. *Transcript* shows the exact text Fish Audio voiced, with its audio tags, to read, copy or download |
 | **One-command start** | `./start.sh` for Node, `./start-docker.sh` for Docker; both open the browser when the app is ready |
 
@@ -98,9 +108,17 @@ flowchart LR
 3. **Review.** The script appears in an editor with a tag preview. Edit it directly, send feedback for a revision, or start over.
 4. **Voice and illustrate.** On approval, the server sends the script to Fish Audio's text-to-speech API with your chosen engine, voice and speed. At the same time, Claude reads the story and draws a cover as an SVG, using the series' original artwork as a style reference. If the drawing fails, the audio is still saved and the episode keeps the default art. For the legacy `s1` engine, `[bracket]` tags are converted to its `(parenthesis)` set and unsupported ones are dropped. If a long script is rejected as one request, it is retried paragraph by paragraph and the audio joined.
 5. **Tag.** The browser renders the illustration (or the default art) to a 600×600 PNG, and the server writes it into the MP3's ID3v2.3 tag with the title, narrator (Artist) and "Podcast Studio" (Album). Players only accept PNG or JPEG covers, which is why the SVG is converted first. Older episodes are tagged automatically when the library loads.
-6. **Listen.** The MP3, the cover SVG, the audio transcript (the exact text sent to Fish Audio, as `.txt`) and a JSON record (title, script, engine, voice, word count) are written to `output/` and streamed to the player with range support, so seeking works immediately.
+6. **Listen.** The MP3, the cover SVG, the audio transcript (the exact text sent to Fish Audio, as `.txt`) and a JSON record (title, script, engine, voice, word count and the exact voicing settings shown in the footnote) are written to `output/` and streamed to the player with range support, so seeking works immediately.
 
 All calls to Claude and Fish Audio are made by the local server; the browser only talks to `localhost`.
+
+### How a podcast differs
+
+The Podcast tab runs the same steps with three differences:
+
+- **Writing:** a podcast system prompt and fixed rules ask for one paragraph per turn, labelled with the host's name (`Mason: …`). The server checks the format (only the two hosts, no `(laughs)` or `*actions*`) and asks Claude for one correction if needed; an episode that still breaks the format is refused rather than voiced.
+- **Voicing:** on the S2 engines every Fish Audio request carries both hosts' voices (`reference_id` as a list) and marks each turn with `<|speaker:0|>` or `<|speaker:1|>`. The dialogue is sent in windows of whole turns of up to 700 characters, three at a time, and the audio is joined in order. In testing, one request for a whole 8-minute episode gave 8 of 27 short reactions to the wrong host; 700-character windows got all 28 right, and were faster. On Drama 3 and S1 each turn is its own request with one voice.
+- **Credits:** the footnote reads *Hosted by Mason and Harper (voices by Fish Official, IDs …)*, the MP3's Artist is *Mason & Harper*, and the lyrics name who is speaking.
 
 ## Quick start
 
@@ -156,9 +174,23 @@ The start scripts also read:
 | `FORCE` | `0` | Set to `1` to stop whatever holds the port without asking |
 | `IMAGE`, `CONTAINER_NAME` | `podcast-studio` | Docker image and container names (`start-docker.sh`) |
 
+## Podcast mode
+
+![The Podcast tab: the show's system prompt, the hosts and the story](docs/podcast-brief.png)
+
+- **Hosts:** a male and a female host, *Mason* and *Harper* by default: Fish Audio official voices tagged young, conversational, confident and brisk, chosen for energy. (Calm narration voices made an earlier version sound flat.) Rename them in the Brief panel; renaming also renames their lines in the script. Pick each host's voice in the Production panel with *Choose voice*; picking a voice never renames a host.
+- **The story:** paste any story into the user prompt, or pick one of your audio summaries under *Start from an episode* (the newest is preselected). First-person stories work: the hosts talk about "our storyteller" rather than claiming the story as their own.
+- **The episode:** an opening where the hosts introduce themselves and say what they're going to dig into; the story from start to finish, with banter and a few genuine disagreements about choices and meaning; two or three takeaways; one open question for the listener; and a goodbye. Light-hearted, humorous and professional, with laughs taken from the story rather than canned filler.
+- **Length:** the slider sets the target; conversation is planned at about 150 spoken words per minute.
+- **Engines:** all five. The S2 engines (`s2.1-pro-free`, `s2.1-pro`, `s2-pro`) voice both hosts per request; *Drama 3* and *S1* voice each line separately with that host's voice, so the right host always speaks. Podcasts use livelier sampling than summaries (temperature/top-p 0.9; Drama 3 1.0/0.9).
+- **Energy:** the script gives most turns a delivery cue (`[excited]`, `[very excited]`, `[teasing]`…) and spoken laughter (`[laughing] Ha!`). Measured on the same story, the new hosts and cues raised pitch variation by about 20% and pace from 153 to 174 words a minute.
+- **Review:** the tag preview colours each turn by host, and the stats show turns and estimated length.
+
+![A podcast in the player and the Podcast library](docs/podcast-player.png)
+
 ## Prompts
 
-Both prompts are edited in the **Brief** panel.
+Both prompts are edited in the **Brief** panel. The two tabs keep separate system prompts; the podcast one uses `{{male}}` and `{{female}}`, which become the host names.
 
 - **System prompt: how Claude writes.** The default asks for a National Geographic-style natural-history narrator: open in the middle of the sensation, observe like a naturalist, build tension, vary rhythm, stay factual, and end with a reflective close and a warm goodbye. Your edits are remembered in the browser; *Reset to default* restores the original.
 - **User prompt: the story.** What happened, where, and what the listener should feel. A white-knuckle drive up the Mount Washington Auto Road in peak fall foliage is pre-filled as an example.
@@ -192,7 +224,7 @@ Fish Audio's voice search matches **voice titles only**, not creator names, and 
 
 Podcast Studio itself is free; the two APIs it calls are billed by their providers.
 
-- **Claude:** one or two Sonnet requests per script (two if a length correction is needed), plus one per episode for its cover illustration. See [Anthropic pricing](https://www.anthropic.com/pricing).
+- **Claude:** one or two Sonnet requests per script (two if a length correction is needed; a podcast may need one more if its format needs fixing), plus one per episode for its cover illustration. See [Anthropic pricing](https://www.anthropic.com/pricing).
 - **Fish Audio:** charged per generated audio from your **API credit**, except on the free-tier engine. API credit is separate from a fish.audio web subscription; top it up at <https://fish.audio/app/developers>.
 
 ## Security and privacy
@@ -211,6 +243,9 @@ Podcast Studio itself is free; the two APIs it calls are billed by their provide
 | *Fish Audio won't voice this … (402)* | Your Fish Audio API credit is empty (a web subscription doesn't cover the API). Add credit, or use `s2.1-pro-free` |
 | *Claude ran out of room before finishing* | Rare with the current settings; click *Write the narrative* again or shorten the length |
 | *Docker is installed but not running* | Start Docker Desktop, then re-run `./start-docker.sh` |
+| *Claude didn't follow the podcast format* | Rare; click *Write the podcast* again. If you edited the podcast system prompt heavily, try *Reset to default* |
+| *This script can't be voiced: it has lines for “X”…* | Every turn must start with one of the two host names and a colon. Fix the label in the script, or rename the host to match |
+| A short podcast line sounds like the other host | An occasional slip on very short turns; approve again to re-voice the episode |
 | The voice varies between runs | Pick a specific voice instead of *Engine voice* |
 | A voice can't be found by its creator's name | Fish search matches titles only. Paste the voice ID or fish.audio link, or use *More by* on one of the creator's voices |
 
@@ -220,10 +255,11 @@ Podcast Studio itself is free; the two APIs it calls are billed by their provide
 npm test
 ```
 
-The test suite starts the real server against mock Claude and Fish Audio endpoints (no keys or network needed). It covers the full write-review-voice flow, prompt handling, truncated replies, voice lookup and official voices, illustrations and their sanitizing, audio transcripts, MP3 cover tagging, deletion, error messages, range requests, key handling, and Host and Origin protection.
+The test suite starts the real server against mock Claude and Fish Audio endpoints (no keys or network needed). It covers the full write-review-voice flow for both tabs (including podcast scripts, format checks, two-voice windows and per-tab drafts), prompt handling, truncated replies, voice lookup and official voices, illustrations and their sanitizing, audio transcripts, MP3 cover tagging, deletion, error messages, range requests, key handling, and Host and Origin protection.
 
 ```
 server.js          Node server: static files, Claude + Fish Audio proxy, keys, audio streaming, library
+podcast.js         Podcast mode: prompts, dialogue parsing and checks, Fish dialogue windows, credits
 public/            index.html, styles.css, app.js (the one-page app), default-art.svg (series cover)
 test/smoke.js      End-to-end tests with mock upstreams
 start.sh           Start with Node and open the browser

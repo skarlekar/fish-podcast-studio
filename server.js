@@ -20,6 +20,7 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const OUTPUT_DIR = process.env.OUTPUT_DIR ? path.resolve(process.env.OUTPUT_DIR) : path.join(ROOT, 'output');
 const SAMPLES_DIR = process.env.SAMPLES_DIR ? path.resolve(process.env.SAMPLES_DIR) : path.join(ROOT, 'samples');
+const pod = require('./podcast.js');
 const ENV_PATH = process.env.ENV_FILE ? path.resolve(process.env.ENV_FILE) : path.join(ROOT, '.env');
 
 // ---------------------------------------------------------------- .env loading
@@ -183,6 +184,7 @@ async function callClaude(system, messages, maxTokens) {
 }
 
 async function handleNarrative(body) {
+  if (body.mode === 'podcast') return handlePodcastScript(body);
   requireKey('anthropic');
   const instructions = String(body.instructions || '').trim().slice(0, 8000);
   if (!instructions) throw new HttpError(400, 'Describe what the narrative should be about first.');
@@ -236,6 +238,69 @@ async function handleNarrative(body) {
   return { ...result, targetWords: target, minutes, model: CLAUDE_MODEL };
 }
 
+/** Podcast mode: Claude turns the story into a two-host episode; format slips get one correction, never voiced. */
+async function handlePodcastScript(body) {
+  requireKey('anthropic');
+  const instructions = String(body.instructions || '').trim().slice(0, 30000);
+  if (!instructions) throw new HttpError(400, 'Paste the story the hosts should talk about first.');
+  let hosts;
+  try {
+    hosts = pod.validHosts(body.hosts);
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+  const minutes = Math.min(15, Math.max(1, Number(body.minutes) || 5));
+  const target = Math.round(minutes * pod.PODCAST_WPM);
+  const system = pod.buildPodcastSystemPrompt(minutes, String(body.system || '').slice(0, 20000), hosts);
+  const messages = [
+    { role: 'user', content: `The story for today's episode:\n\n${instructions}\n\nWrite the complete ${minutes}-minute episode script now, hosted by ${hosts.male} and ${hosts.female}.` },
+  ];
+  const prev = body.previous;
+  const feedback = String(body.feedback || '').trim().slice(0, 4000);
+  if (prev && typeof prev.script === 'string' && feedback) {
+    messages.push(
+      { role: 'assistant', content: `TITLE: ${String(prev.title || 'Untitled').slice(0, 200)}\n\n${prev.script.slice(0, 30000)}` },
+      {
+        role: 'user',
+        content: `Revise the episode using this feedback from the producer:\n\n${feedback}\n\nKeep both hosts (${hosts.male} and ${hosts.female}), the same output format and the ~${target} spoken-word target. Return the complete revised script.`,
+      },
+    );
+  }
+
+  const maxTokens = 16000;
+  let text = await callClaude(system, messages, maxTokens);
+  let result = parseNarrative(text);
+  let problem = pod.checkDialogue(result.script, hosts);
+  let history = [...messages, { role: 'assistant', content: text }];
+  if (problem) {
+    const fix = { role: 'user', content: `That script breaks the format: ${problem}. Return the complete script again, fixing that and keeping everything else.` };
+    text = await callClaude(system, [...history, fix], maxTokens);
+    result = parseNarrative(text);
+    problem = pod.checkDialogue(result.script, hosts);
+    if (problem) throw new HttpError(502, `Claude didn't follow the podcast format (${problem}). Please try again.`);
+    history = [...history, fix, { role: 'assistant', content: text }];
+  }
+
+  // One length pass, built on the latest valid script; used only if it is closer and still valid.
+  const words = pod.dialogueWords(result.script, hosts);
+  if (words < target * 0.85 || words > target * 1.15) {
+    try {
+      const direction = words < target ? 'add exchanges and more debate about the story' : 'cut repetition and tighten the exchanges';
+      const retry = await callClaude(
+        system,
+        [...history, { role: 'user', content: `That episode is about ${words} spoken words, but the target is ${target} (a ${minutes}-minute episode). Rewrite it so it lands within 5% of ${target} spoken words: ${direction}. Keep the hosts, the structure, the tags and the format. Return the complete script.` }],
+        maxTokens,
+      );
+      const second = parseNarrative(retry);
+      if (!pod.checkDialogue(second.script, hosts) && Math.abs(pod.dialogueWords(second.script, hosts) - target) < Math.abs(words - target)) result = second;
+    } catch {
+      /* keep the valid draft */
+    }
+  }
+  const script = pod.turnsToScript(pod.parseTurns(result.script, hosts).turns);
+  return { title: result.title, script, targetWords: target, minutes, model: CLAUDE_MODEL, mode: 'podcast' };
+}
+
 // ---------------------------------------------------------------- illustration (Claude draws the cover)
 const DEFAULT_ART = fs.readFileSync(path.join(PUBLIC_DIR, 'default-art.svg'), 'utf8').trim();
 
@@ -272,9 +337,10 @@ function sanitizeSvg(raw) {
   return svg.length <= 200_000 ? svg : null;
 }
 
-async function drawArt(title, script) {
+async function drawArt(title, script, { podcast = false } = {}) {
   requireKey('anthropic');
-  const content = `Episode title: ${title}\n\nStory:\n${stripTags(script).slice(0, 15000)}\n\nDraw the cover illustration now.`;
+  const about = podcast ? '\n\nThis episode is a two-host conversation about the story below. Illustrate the story\'s subject and its key moment, not the hosts or a studio.' : '';
+  const content = `Episode title: ${title}${about}\n\nStory:\n${stripTags(script).slice(0, 15000)}\n\nDraw the cover illustration now.`;
   const svg = sanitizeSvg(await callClaude(ART_PROMPT, [{ role: 'user', content }], 16000));
   if (!svg) throw new HttpError(502, 'Claude did not return a usable illustration. Please try again.');
   return svg;
@@ -306,7 +372,7 @@ async function handleIllustrate(body) {
   } catch {
     throw new HttpError(404, 'That episode no longer exists.');
   }
-  meta.art = await saveArt(file, await drawArt(meta.title || 'Untitled Episode', meta.script || ''));
+  meta.art = await saveArt(file, await drawArt(meta.title || 'Untitled Episode', meta.script || '', { podcast: meta.mode === 'podcast' }));
   meta.coverOf = null; // the MP3 still carries the previous picture
   await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2));
   return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(meta.art), needsCover: true };
@@ -344,7 +410,8 @@ function lyricsOf(text) {
 /** The episode's lyrics: the saved transcript is exactly what was voiced; very old episodes fall back to the script. */
 async function episodeLyrics(meta) {
   const spoken = meta.transcript ? await fsp.readFile(path.join(OUTPUT_DIR, path.basename(meta.transcript)), 'utf8').catch(() => meta.script || '') : meta.script || '';
-  return lyricsOf(spoken);
+  // Podcasts: Fish's speaker markers become the hosts' names, so the lyrics read like a script.
+  return lyricsOf(meta.mode === 'podcast' && Array.isArray(meta.speakers) ? pod.dialogueLyrics(spoken, meta.speakers.map((s) => s.name)) : spoken);
 }
 
 // USLT = unsynchronised lyrics: UTF-16 text, language, empty descriptor, then the text.
@@ -368,6 +435,7 @@ function id3Length(buf) {
 
 /** The narrator's name for the Artist field: the voice name, or its creator when the title is generic. */
 function narratorName(meta) {
+  if (meta.mode === 'podcast' && Array.isArray(meta.speakers)) return pod.hostedBy(meta.speakers);
   if (!meta.voiceId) return null;
   const title = String(meta.voiceTitle || '').trim();
   const generic = !title || /^(the )?(narrator|narration|voice|custom voice)$/i.test(title);
@@ -455,16 +523,25 @@ function chunkText(text, maxLen = 2500) {
   return chunks;
 }
 
-async function fishTts(text, { engine, voiceId, speed }) {
+// What every Fish request sends besides the text and voice; episodes record these with the sampling used.
+const FISH_OUTPUT = { latency: 'normal', mp3Bitrate: 128, normalize: true };
+const NARRATION_SAMPLING = { temperature: 0.7, topP: 0.7 };
+
+/** The settings an episode was voiced with, as shown in its footnote. */
+function voiceSettings({ sampling, speed, requests, voicing }) {
+  return { temperature: sampling.temperature, topP: sampling.topP, speed, latency: FISH_OUTPUT.latency, mp3Bitrate: FISH_OUTPUT.mp3Bitrate, normalize: FISH_OUTPUT.normalize, requests, voicing };
+}
+
+async function fishTts(text, { engine, voiceId, speed, temperature = NARRATION_SAMPLING.temperature, topP = NARRATION_SAMPLING.topP }) {
   const body = {
     text,
     format: 'mp3',
-    mp3_bitrate: 128,
-    normalize: true,
-    latency: 'normal',
+    mp3_bitrate: FISH_OUTPUT.mp3Bitrate,
+    normalize: FISH_OUTPUT.normalize,
+    latency: FISH_OUTPUT.latency,
     language: 'en',
-    temperature: 0.7,
-    top_p: 0.7,
+    temperature,
+    top_p: topP,
     prosody: { speed, volume: 0, normalize_loudness: true },
   };
   if (voiceId) body.reference_id = voiceId;
@@ -506,7 +583,32 @@ function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'episode';
 }
 
+/** Draw the cover while Fish voices the script; a failed drawing never blocks the audio. */
+function startArt(title, script, opts) {
+  if (!keys.anthropic) return Promise.resolve(null);
+  return drawArt(title, script, opts).catch((err) => {
+    console.warn(`  Illustration skipped: ${redact(err.message)}`);
+    return null;
+  });
+}
+
+/** Save the MP3, the exact text Fish voiced, the illustration and the episode record; return the API response. */
+async function saveEpisode({ title, audio, sentText, artJob, fields }) {
+  await fsp.mkdir(OUTPUT_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+  const file = `${stamp}-${slugify(title)}.mp3`;
+  await fsp.writeFile(path.join(OUTPUT_DIR, file), audio);
+  const transcript = file.replace(/\.mp3$/, '.txt');
+  await fsp.writeFile(path.join(OUTPUT_DIR, transcript), sentText);
+  const svg = await artJob;
+  const art = svg ? await saveArt(file, svg) : null;
+  const meta = { file, title, createdAt: new Date().toISOString(), ...fields, bytes: audio.length, art, transcript };
+  await fsp.writeFile(path.join(OUTPUT_DIR, file.replace(/\.mp3$/, '.json')), JSON.stringify(meta, null, 2));
+  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(art), transcriptUrl: transcriptUrl(transcript), needsCover: true, savedTo: path.join('output', file) };
+}
+
 async function handleAudio(body) {
+  if (body.mode === 'podcast') return handlePodcastAudio(body);
   requireKey('fish');
   const script = String(body.script || '').trim();
   if (script.length < 20) throw new HttpError(400, 'The script is empty.');
@@ -516,13 +618,7 @@ async function handleAudio(body) {
   const voiceId = /^[A-Za-z0-9_-]{8,64}$/.test(String(body.voiceId || '')) ? String(body.voiceId) : '';
   const title = String(body.title || 'Untitled Episode').slice(0, 200);
   const text = prepareText(script, engineDef.tagStyle);
-  // Draw the cover while Fish Audio voices the script; a failed drawing never blocks the audio.
-  const artJob = keys.anthropic
-    ? drawArt(title, script).catch((err) => {
-        console.warn(`  Illustration skipped: ${redact(err.message)}`);
-        return null;
-      })
-    : Promise.resolve(null);
+  const artJob = startArt(title, script);
 
   let audio;
   let chunks = 1;
@@ -543,32 +639,121 @@ async function handleAudio(body) {
     }
   }
 
-  await fsp.mkdir(OUTPUT_DIR, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-  const file = `${stamp}-${slugify(title)}.mp3`;
-  await fsp.writeFile(path.join(OUTPUT_DIR, file), audio);
-  const transcript = file.replace(/\.mp3$/, '.txt');
-  await fsp.writeFile(path.join(OUTPUT_DIR, transcript), sentText);
-  const svg = await artJob;
-  const art = svg ? await saveArt(file, svg) : null;
-  const meta = {
-    file,
+  return saveEpisode({
     title,
-    createdAt: new Date().toISOString(),
-    engine: engineDef.id,
-    voiceId: voiceId || null,
-    voiceTitle: String(body.voiceTitle || (voiceId ? 'Custom voice' : 'Engine voice')).slice(0, 120),
-    voiceAuthor: voiceId && body.voiceAuthor ? String(body.voiceAuthor).slice(0, 120) : null,
-    speed,
-    words: spokenWords(script),
-    bytes: audio.length,
-    chunks,
-    art,
-    transcript,
-    script,
+    audio,
+    sentText,
+    artJob,
+    fields: {
+      engine: engineDef.id,
+      voiceId: voiceId || null,
+      voiceTitle: String(body.voiceTitle || (voiceId ? 'Custom voice' : 'Engine voice')).slice(0, 120),
+      voiceAuthor: voiceId && body.voiceAuthor ? String(body.voiceAuthor).slice(0, 120) : null,
+      speed,
+      words: spokenWords(script),
+      chunks,
+      settings: voiceSettings({ sampling: NARRATION_SAMPLING, speed, requests: chunks, voicing: 'one voice' }),
+      script,
+    },
+  });
+}
+
+const RETRY_MS = Number(process.env.FISH_RETRY_MS) || 1500;
+// Every engine can make a podcast. The S2 engines voice both hosts per request (windows of whole turns); Drama 3
+// and S1 voice one turn per request with that host's voice: S1 has no multi-speaker mode, and Drama 3's two-voice
+// mapping couldn't be verified (its excited male lines jump into the female pitch range).
+const PODCAST_ENGINES = ENGINES.map((e) => e.id);
+const TWO_VOICE_ENGINES = ['s2.1-pro-free', 's2.1-pro', 's2-pro'];
+const PODCAST_DEFAULT_ENGINE = TWO_VOICE_ENGINES.includes(DEFAULT_ENGINE) ? DEFAULT_ENGINE : 's2.1-pro-free';
+// Livelier sampling than narration's 0.7/0.7; Drama 3 uses its model card's settings.
+const PODCAST_SAMPLING = { 'drama-3': { temperature: 1.0, topP: 0.9 }, s1: { temperature: 0.7, topP: 0.7 } };
+const podcastSampling = (engine) => PODCAST_SAMPLING[engine] || { temperature: 0.9, topP: 0.9 };
+const VOICE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** One Fish request, retried twice with a growing pause when Fish is busy (429) or overloaded (503). */
+async function fishTtsRetry(text, opts) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fishTts(text, opts);
+    } catch (err) {
+      if (attempt >= 2 || ![429, 503].includes(err.upstreamStatus)) throw err;
+      await new Promise((r) => setTimeout(r, RETRY_MS * (attempt + 1)));
+    }
+  }
+}
+
+/**
+ * Podcast mode: both hosts in every Fish request, voiced in windows of whole turns (see PODCAST_WINDOW),
+ * three at a time, joined in script order.
+ */
+async function handlePodcastAudio(body) {
+  requireKey('fish');
+  const script = String(body.script || '').trim();
+  if (script.length < 20) throw new HttpError(400, 'The script is empty.');
+  if (script.length > 60000) throw new HttpError(400, 'The script is too long (limit 60,000 characters).');
+  const engineDef = ENGINES.find((e) => e.id === body.engine) || ENGINES.find((e) => e.id === PODCAST_DEFAULT_ENGINE);
+  const speakers = Array.isArray(body.speakers) ? body.speakers.slice(0, 2) : [];
+  if (speakers.length !== 2 || !speakers.every((s) => VOICE_ID_RE.test(String(s?.voiceId || '')))) {
+    throw new HttpError(400, 'Choose a voice for both hosts. (Engine voice can\'t be used for a podcast.)');
+  }
+  let hosts;
+  try {
+    hosts = pod.validHosts({ male: speakers[0].name, female: speakers[1].name });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+  const problem = pod.checkDialogue(script, hosts);
+  if (problem) throw new HttpError(400, `This script can't be voiced: ${problem}. Every turn must start with ${hosts.male}: or ${hosts.female}:.`);
+  const speed = Math.min(2, Math.max(0.5, Number(body.speed) || 1));
+  const title = String(body.title || 'Untitled Episode').slice(0, 200);
+  const artJob = startArt(title, script, { podcast: true });
+
+  const voices = speakers.map((s) => String(s.voiceId));
+  const turns = pod.parseTurns(script, hosts).turns;
+  // Requests: windows of whole turns with both voices (S2), or one turn per request with that host's voice.
+  const jobs = TWO_VOICE_ENGINES.includes(engineDef.id)
+    ? pod.chunkDialogue(turns).map((w) => ({ text: prepareText(w, 'brackets'), voiceId: voices }))
+    : turns.map((t) => ({ text: prepareText(t.text, engineDef.tagStyle), voiceId: voices[t.speaker], speaker: t.speaker }));
+  const sampling = podcastSampling(engineDef.id);
+  const parts = new Array(jobs.length);
+  let next = 0;
+  let failed = false; // after one request fails, send no more: the episode is lost and the characters would be billed
+  const worker = async () => {
+    while (!failed && next < jobs.length) {
+      const i = next++;
+      try {
+        parts[i] = await fishTtsRetry(jobs[i].text, { engine: engineDef.id, voiceId: jobs[i].voiceId, speed, ...sampling });
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
   };
-  await fsp.writeFile(path.join(OUTPUT_DIR, file.replace(/\.mp3$/, '.json')), JSON.stringify(meta, null, 2));
-  return { ...meta, url: `/audio/${encodeURIComponent(file)}`, artUrl: artUrl(art), transcriptUrl: transcriptUrl(transcript), needsCover: true, savedTo: path.join('output', file) };
+  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, worker));
+  // The transcript keeps a speaker marker on every line, so it (and the lyrics) record who voiced what.
+  const sentText = jobs.map((j) => (j.speaker === undefined ? j.text : `<|speaker:${j.speaker}|>${j.text}`)).join('\n\n');
+
+  const clip = (v) => String(v || '').slice(0, 120) || null;
+  return saveEpisode({
+    title,
+    audio: Buffer.concat(parts),
+    sentText,
+    artJob,
+    fields: {
+      mode: 'podcast',
+      engine: engineDef.id,
+      voiceId: null,
+      voiceTitle: null,
+      voiceAuthor: null,
+      speakers: speakers.map((s, i) => ({ name: i ? hosts.female : hosts.male, voiceId: voices[i], voiceTitle: clip(s.voiceTitle), voiceAuthor: clip(s.voiceAuthor) })),
+      speed,
+      words: pod.dialogueWords(script, hosts),
+      chunks: jobs.length,
+      settings: voiceSettings({ sampling, speed, requests: jobs.length, voicing: TWO_VOICE_ENGINES.includes(engineDef.id) ? 'both voices per request' : 'one line per request' }),
+      script,
+      source: body.source ? String(body.source).slice(0, 20000) : null,
+    },
+  });
 }
 
 function voiceItem(m) {
@@ -648,6 +833,9 @@ async function listEpisodes() {
       if (meta.file && fs.existsSync(path.join(OUTPUT_DIR, meta.file))) {
         out.push({
           ...meta,
+          mode: meta.mode || 'summary',
+          // Until settings were recorded, every request used the narration sampling and the same output settings.
+          settings: meta.settings || voiceSettings({ sampling: NARRATION_SAMPLING, speed: meta.speed ?? 1, requests: meta.chunks ?? 1, voicing: meta.mode === 'podcast' ? 'both voices per request' : 'one voice' }),
           url: `/audio/${encodeURIComponent(meta.file)}`,
           artUrl: artUrl(meta.art),
           transcriptUrl: transcriptUrl(meta.transcript),
@@ -763,6 +951,15 @@ function configPayload() {
     defaultSystemPrompt: DEFAULT_SYSTEM_PROMPT,
     promptRules: PROMPT_RULES,
     defaultVoiceId: DEFAULT_VOICE_ID,
+    podcast: {
+      defaultPrompt: pod.DEFAULT_PODCAST_PROMPT,
+      rules: pod.PODCAST_RULES,
+      defaultBrief: pod.DEFAULT_PODCAST_BRIEF,
+      hosts: pod.PODCAST_DEFAULTS,
+      engines: PODCAST_ENGINES,
+      defaultEngine: PODCAST_DEFAULT_ENGINE,
+      wpm: pod.PODCAST_WPM,
+    },
   };
 }
 

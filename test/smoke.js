@@ -12,6 +12,8 @@ const FISH_KEY = 'fish-test-0123456789';
 const calls = { claude: [], tts: [], model: [], art: [], artFailNext: false };
 const VOICE_ID = '785ee4188c594830bc2ec7065817c1e1';
 const SARAH_ID = '933563129e564b19a115bedd57b7406a';
+const MASON_ID = '02e950ce577d4f008a2dfb4782789a3a'; // default male podcast host
+const HARPER_ID = 'c250136a9ec74cc0b799be54664a83f2'; // default female podcast host
 const OFFICIAL_ID = 'd8b0991f96b44e489422ca2ddf0bd31d'; // Fish Official account
 const AUTHOR_ID = '9672b25f05dd4f7fa38257dea00ad01d';
 
@@ -59,6 +61,22 @@ function mockUpstream() {
           return json(200, { stop_reason: 'end_turn', content: [{ type: 'text', text: `Here you go:\n${svg}\n` }] });
         }
         calls.claude.push(parsed);
+        // Podcast scripts: valid dialogue for the host names in the rules; BADFORMAT / ALWAYSBAD briefs slip.
+        const hostsIn = parsed.system.match(/labelled exactly (.+?) and (.+?)\. Every turn/);
+        if (hostsIn) {
+          const [m, f] = [hostsIn[1], hostsIn[2]];
+          const dialogue = (n, words, extra = '') => Array.from({ length: n }, (_, i) => `${i % 2 ? f : m}: ${i === 1 ? extra : ''}${'word '.repeat(words).trim()} number ${i}.`).join('\n\n');
+          const brief = parsed.messages[0].content;
+          const last = parsed.messages.at(-1).content;
+          const bad = `${m}: Welcome (laughs) to the show.\n\nNarrator: Meanwhile.\n\n${f}: Hi.`;
+          let text;
+          if (/ALWAYSBAD/.test(brief)) text = bad;
+          else if (/breaks the format/.test(last)) text = dialogue(8, 10, 'CORRECTED ');
+          else if (parsed.messages.length === 1 && /BADFORMAT/.test(brief)) text = bad;
+          else if (parsed.messages.length === 1) text = `Sure! Here is your episode.\n\n${dialogue(8, 10)}`;
+          else text = dialogue(50, 14);
+          return json(200, { stop_reason: 'end_turn', content: [{ type: 'text', text: `TITLE: The Orange Cord, Discussed\n\n${text}` }] });
+        }
         // A brief containing CUTOFF simulates Claude hitting max_tokens mid-sentence.
         if (/CUTOFF/.test(parsed.messages[0].content)) {
           return json(200, { stop_reason: 'max_tokens', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'TITLE: Cut\n\n[soft tone] I st' }] });
@@ -71,7 +89,13 @@ function mockUpstream() {
         if (req.headers.authorization !== `Bearer ${FISH_KEY}`) return json(401, { message: 'unauthorized' });
         const parsed = JSON.parse(body);
         calls.tts.push({ model: req.headers.model, body: parsed });
-        if (req.headers.model === 'drama-3') return json(402, { status: 402, message: 'Insufficient API credit. API credit is managed independently from platform credit. Please visit https://fish.audio/app/developers to view your API credit balance or add funds.' });
+        if (Array.isArray(parsed.reference_id)) {
+          if (/RETRY429/.test(parsed.text) && !calls.retried) { calls.retried = true; return json(429, { message: 'slow down' }); }
+          if (/FAILHERE/.test(parsed.text)) return json(500, { message: 'boom' });
+          res.writeHead(200, { 'content-type': 'audio/mpeg' });
+          return res.end(Buffer.concat([Buffer.from(`WIN[${parsed.text.slice(0, 24)}]`), Buffer.alloc(1200, 5)]));
+        }
+        if (req.headers.model === 'drama-3' && /^x+$/.test(parsed.text)) return json(402, { status: 402, message: 'Insufficient API credit. API credit is managed independently from platform credit. Please visit https://fish.audio/app/developers to view your API credit balance or add funds.' });
         res.writeHead(200, { 'content-type': 'audio/mpeg' });
         return res.end(Buffer.concat([Buffer.from('ID3'), Buffer.alloc(5000, 7)]));
       }
@@ -106,8 +130,6 @@ async function check(name, fn) {
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   const up = `http://127.0.0.1:${upstream.address().port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-test-'));
-  const port = 3900 + Math.floor(Math.random() * 90);
-  const base = `http://127.0.0.1:${port}`;
   const envFile = path.join(tmp, '.env');
   // A tiny sample library, standing in for samples/ (checked separately below).
   const samplesDir = path.join(tmp, 'samples');
@@ -116,23 +138,118 @@ async function check(name, fn) {
   fs.writeFileSync(path.join(samplesDir, 'sample-one.txt'), '[calm] A sample.');
   fs.writeFileSync(path.join(samplesDir, 'sample-one.json'), JSON.stringify({ file: 'sample-one.mp3', title: 'Sample One', createdAt: '2026-01-01T00:00:00.000Z', engine: 's2.1-pro-free', transcript: 'sample-one.txt', script: '[calm] A sample.', coverOf: 'default', lyricsIn: true, bytes: 2000 }));
 
-  const startServer = (p) => {
+  // Every server gets a port the OS picks (PORT=0); its real port is read from the "running at" line,
+  // so test servers can never collide with each other or with anything else on the machine.
+  const servers = [];
+  const startServer = (extraEnv = {}) => {
     const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
       env: {
-        PATH: process.env.PATH, PORT: String(p), OUTPUT_DIR: path.join(tmp, 'output'), ENV_FILE: envFile, SAMPLES_DIR: samplesDir,
-        ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '',
+        PATH: process.env.PATH, PORT: '0', OUTPUT_DIR: path.join(tmp, 'output'), ENV_FILE: envFile, SAMPLES_DIR: samplesDir,
+        ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '', FISH_RETRY_MS: '20', ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'inherit'],
     });
-    return new Promise((resolve, reject) => { proc.stdout.on('data', (d) => /running at/.test(String(d)) && resolve(proc)); proc.on('exit', reject); });
+    servers.push(proc);
+    return new Promise((resolve, reject) => {
+      proc.stdout.on('data', (d) => {
+        const m = String(d).match(/running at http:\/\/[^:]+:(\d+)/);
+        if (m) resolve({ proc, port: Number(m[1]) });
+      });
+      proc.on('exit', (code) => reject(new Error(`server exited (${code}) before it was ready`)));
+    });
   };
-  const child = await startServer(port);
+  const { proc: child, port } = await startServer();
+  const base = `http://127.0.0.1:${port}`;
 
   const get = (p, h) => fetch(base + p, { headers: h });
   const post = (p, body, h = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', ...h }, body: JSON.stringify(body) });
   let episode;
 
   console.log('Podcast Studio smoke test');
+
+  // ---- podcast.js: pure helpers (no server needed)
+  const pod = () => require('../podcast.js');
+  const HOSTS = { male: 'Adrian', female: 'Sarah' };
+  const MALE_ID = 'bf322df2096a46f18c579d0baa36f41d';
+  const SPEAKERS = [
+    { name: 'Adrian', voiceId: MALE_ID, voiceTitle: 'Adrian', voiceAuthor: 'Fish Official' },
+    { name: 'Sarah', voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: 'Fish Official' },
+  ];
+  const podcastScript = (n, words = 6) => Array.from({ length: n }, (_, i) => `${i % 2 ? 'Sarah' : 'Adrian'}: [amused]   Turn ${i} ${'word '.repeat(words).trim()}.`).join('\n\n');
+  const VALID6 = 'Adrian: [amused] Welcome back!\n\nSarah: Hi, everyone.\n\nAdrian: Today, a skydive.\n\nSarah: [teasing] You hate heights.\n\nAdrian: Which is why it is fun.\n\nSarah: Goodbye, everyone!';
+  await check('podcast: system prompt names both hosts, structure, storyteller and rules', async () => {
+    const sys = pod().buildPodcastSystemPrompt(5, '', HOSTS);
+    for (const want of ['Adrian (male)', 'Sarah (female)', 'our storyteller', 'two or three concrete takeaways', 'open-ended question', '750 spoken words', 'labelled exactly Adrian and Sarah', 'parentheses or asterisks']) assert.ok(sys.includes(want), want);
+    assert.ok(!sys.includes('{{'), 'all placeholders filled');
+    assert.ok(pod().buildPodcastSystemPrompt(5, 'Custom for {{male}} and {{female}}.', HOSTS).startsWith('Custom for Adrian and Sarah.'));
+  });
+  await check('podcast: the prompt asks for an energetic, expressive performance', async () => {
+    const sys = pod().buildPodcastSystemPrompt(5, '', HOSTS);
+    assert.match(sys, /high-energy and genuinely engaging/i);
+    for (const want of ['[very excited]', '[laughing] Ha!', 'Give most turns a delivery tag']) assert.ok(sys.includes(want), want);
+    assert.ok(!/leave many turns untagged/i.test(sys), 'no longer asks for untagged turns');
+  });
+  await check('podcast: only host names (and known labels) start turns', async () => {
+    const { turns, unknown, preamble } = pod().parseTurns("Sure! Here's your script.\n\nAdrian: Hi.\n\n**sarah:** Hello!\n\nSo here's the thing: more of Sarah's turn\n\nAdrian: Bye.\n\nADRIAN: And again.", HOSTS);
+    assert.deepEqual(turns.map((t) => t.speaker), [0, 1, 0]);
+    assert.ok(turns[1].text.includes("here's the thing"), 'colon inside a sentence is not a label');
+    assert.ok(turns[2].text.includes('And again'), 'back-to-back turns by one host merge');
+    assert.deepEqual(unknown, []);
+    assert.match(preamble, /Here's your script/);
+  });
+  await check('podcast: format problems are explained', async () => {
+    const c = (t) => pod().checkDialogue(t, HOSTS);
+    assert.equal(c(VALID6), null);
+    assert.match(c(VALID6 + '\n\nNarrator: The end.'), /Narrator/);
+    assert.match(c(VALID6.replace('Sarah: Goodbye', 'Both: Goodbye')), /Both/);
+    assert.match(c(VALID6.replace('You hate heights.', 'You hate heights. (laughs)')), /parenthes/i);
+    assert.match(c(VALID6.replace('You hate heights.', 'You hate heights. *chuckles*')), /asterisk/i);
+    assert.match(c('Adrian: One.\n\nAdrian: Two.\n\nAdrian: Three.'), /Sarah/);
+    assert.match(c('Adrian: Hi.\n\nSarah: Hi.'), /turns/i);
+  });
+  await check('podcast: Fish text and windows keep speaker markers', async () => {
+    const { turns } = pod().parseTurns(VALID6, HOSTS);
+    assert.equal(pod().fishDialogueText(turns.slice(0, 2)), '<|speaker:0|>[amused] Welcome back!\n\n<|speaker:1|>Hi, everyone.');
+    const chunks = pod().chunkDialogue(turns, 60);
+    assert.ok(chunks.length > 1);
+    for (const ch of chunks) assert.ok(ch.startsWith('<|speaker:'), ch);
+    assert.equal(chunks.join('\n\n'), pod().fishDialogueText(turns), 'all turns, in order');
+    const long = [{ speaker: 1, name: 'Sarah', text: 'One sentence here. '.repeat(10).trim() }];
+    for (const ch of pod().chunkDialogue(long, 60)) { assert.ok(ch.startsWith('<|speaker:1|>')); assert.ok(ch.length <= 60 + 15); }
+    assert.equal(pod().chunkDialogue(turns).length, 1, 'default window holds a short dialogue');
+  });
+  await check('podcast: a host label on the next line starts a new turn (single line break)', async () => {
+    const { turns } = pod().parseTurns('Adrian: Three.\nSarah: Wait, really?\nAdrian: Really.', HOSTS);
+    assert.deepEqual(turns.map((t) => [t.speaker, t.text]), [[0, 'Three.'], [1, 'Wait, really?'], [0, 'Really.']]);
+  });
+  await check('podcast: other name-like labels are refused, ordinary colons are not', async () => {
+    const c = (t) => pod().checkDialogue(t, HOSTS);
+    assert.match(c(VALID6 + '\n\nProducer: Great take, everyone.'), /Producer/);
+    assert.match(c(VALID6.replace('Adrian: Today, a skydive.', 'Mary Jane: I jumped first.')), /Mary Jane/);
+    assert.equal(c(VALID6.replace('Adrian: Today, a skydive.', 'Adrian: Today, a skydive.\n\nSo here is the thing: it was windy.')), null);
+    assert.equal(c(VALID6.replace('Adrian: Today, a skydive.', 'Adrian: Today, a skydive.\n\nLook at this one: wow.')), null);
+  });
+  await check('podcast: only real stage directions in parentheses are refused', async () => {
+    const c = (t) => pod().checkDialogue(VALID6.replace('You hate heights.', t), HOSTS);
+    assert.equal(c('You hate heights (clearly a mistake on my part).'), null);
+    assert.equal(c('You hate heights (smiling aside, I mean it).'), null);
+    for (const bad of ['(laughs)', '(laughing)', '(chuckles softly)', '(sighs)', '(clears throat)', '(pause)', '(whispers)']) assert.match(c(`You hate heights. ${bad}`), /parenthes/i, bad);
+  });
+  await check('podcast: host names validated', async () => {
+    assert.deepEqual(pod().validHosts({ male: ' Adrian ', female: 'Sarah' }), HOSTS);
+    assert.throws(() => pod().validHosts({ male: 'Adrian', female: 'adrian' }), /different/);
+    assert.throws(() => pod().validHosts({ male: '', female: 'Sarah' }));
+    assert.throws(() => pod().validHosts({ male: 'Al<script>', female: 'Sarah' }));
+    assert.throws(() => pod().validHosts({ male: 'A'.repeat(25), female: 'Sarah' }));
+  });
+  await check('podcast: rename, words, lyrics and artist', async () => {
+    assert.equal(pod().renameLabels('Sarah: Hi.\n\nAdrian: Sarah: is me', 'Sarah', 'Maya'), 'Maya: Hi.\n\nAdrian: Sarah: is me');
+    assert.equal(pod().dialogueWords('Adrian: [amused] Hi there.\n\nSarah: Hello!', HOSTS), 3);
+    assert.equal(pod().dialogueLyrics('<|speaker:0|>Hi.\n\n<|speaker:1|>Yo.', ['Adrian', 'Sarah']), 'Adrian: Hi.\n\nSarah: Yo.');
+    assert.equal(pod().hostedBy([{ name: 'Adrian' }, { name: 'Sarah' }]), 'Adrian & Sarah');
+    assert.equal(pod().PODCAST_WPM, 150);
+    assert.deepEqual(pod().PODCAST_DEFAULTS, { male: { name: 'Mason', voiceId: MASON_ID }, female: { name: 'Harper', voiceId: HARPER_ID } }, 'energetic conversational hosts');
+  });
   await check('serves the one-page app', async () => {
     const r = await get('/');
     assert.equal(r.status, 200);
@@ -158,9 +275,13 @@ async function check(name, fn) {
     assert.ok(fs.existsSync(path.join(tmp, 'output', '.samples-added')), 'marker written');
     // Deleted samples don't come back on the next start.
     assert.equal((await post('/api/delete', { file: 'sample-one.mp3' })).status, 200);
-    const again = await startServer(port + 100);
-    const eps = (await (await fetch(`http://127.0.0.1:${port + 100}/api/episodes`)).json()).episodes;
-    again.kill();
+    const again = await startServer();
+    let eps;
+    try {
+      eps = (await (await fetch(`http://127.0.0.1:${again.port}/api/episodes`)).json()).episodes;
+    } finally {
+      again.proc.kill();
+    }
     assert.ok(!eps.some((e) => e.file === 'sample-one.mp3'));
   });
   await check('the repo samples are complete, tagged and free of local paths', async () => {
@@ -235,7 +356,49 @@ async function check(name, fn) {
     const html = await (await get('/')).text();
     assert.match(html, /id="systemPrompt"[\s\S]*id="instructions"/);
     assert.match(html, /id="promptRules"/);
-    assert.match(await (await get('/app.js')).text(), /system: \$\('#systemPrompt'\)/);
+    assert.match(await (await get('/app.js')).text(), /system: \(mode === 'podcast' \? \$\('#podcastPrompt'\) : \$\('#systemPrompt'\)\)\.value/);
+  });
+  await check('podcast script: podcast prompt, hosts, storyteller, length', async () => {
+    calls.claude.length = 0;
+    const r = await post('/api/narrative', { mode: 'podcast', instructions: 'The ledge is cold beneath my knees.', minutes: 5, hosts: HOSTS });
+    const n = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(n));
+    assert.equal(n.mode, 'podcast');
+    assert.match(calls.claude[0].system, /Adrian \(male\)/);
+    assert.match(calls.claude[0].system, /750 spoken words/);
+    assert.match(calls.claude[0].messages[0].content, /The ledge is cold/);
+    assert.match(calls.claude[0].messages[0].content, /hosted by Adrian and Sarah/);
+    assert.equal(calls.claude.length, 2, 'short first draft gets a length pass');
+    assert.match(calls.claude[1].messages.at(-1).content, /add exchanges/);
+    assert.equal(pod().checkDialogue(n.script, HOSTS), null);
+    assert.ok(!/Here is your episode/.test(n.script), 'preamble stripped');
+    assert.equal(n.targetWords, 750);
+  });
+  await check('podcast script: one format correction, built on; a persistent slip is an error', async () => {
+    calls.claude.length = 0;
+    const r = await post('/api/narrative', { mode: 'podcast', instructions: 'BADFORMAT story', minutes: 5, hosts: HOSTS });
+    const n = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(n));
+    assert.match(calls.claude[1].messages.at(-1).content, /breaks the format: .*Narrator/);
+    assert.match(calls.claude[2].messages.at(-2).content, /CORRECTED/, 'length pass builds on the corrected script');
+    assert.equal(pod().checkDialogue(n.script, HOSTS), null);
+    const r2 = await post('/api/narrative', { mode: 'podcast', instructions: 'ALWAYSBAD story', minutes: 5, hosts: HOSTS });
+    assert.equal(r2.status, 502);
+    assert.match((await r2.json()).error, /podcast format/i);
+  });
+  await check('podcast script: bad host names are refused', async () => {
+    const r = await post('/api/narrative', { mode: 'podcast', instructions: 'x', minutes: 5, hosts: { male: 'Sam', female: 'sam' } });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error, /different/);
+  });
+  await check('config offers the podcast defaults, without s1', async () => {
+    const c = await (await get('/api/config')).json();
+    assert.equal(c.podcast.hosts.male.name, 'Mason');
+    assert.equal(c.podcast.wpm, 150);
+    assert.deepEqual(c.podcast.engines, ['s2.1-pro-free', 's2.1-pro', 's2-pro', 'drama-3', 's1'], 'every engine is offered for podcasts');
+    assert.match(c.podcast.defaultPrompt, /\{\{male\}\}/);
+    assert.match(c.podcast.rules, /SPEAKERS \(strict\)/);
+    assert.ok(c.podcast.defaultBrief);
   });
   await check('a script cut off at max_tokens is rejected, never returned', async () => {
     calls.claude.length = 0;
@@ -295,6 +458,11 @@ async function check(name, fn) {
     const t = calls.tts.at(-1);
     assert.equal(t.model, 's2.1-pro-free');
     assert.equal(t.body.reference_id, 'abcdef1234567890');
+    assert.equal(typeof t.body.reference_id, 'string', 'summaries still send one voice');
+    assert.deepEqual([t.body.temperature, t.body.top_p], [0.7, 0.7], 'summaries keep their calmer settings');
+    assert.deepEqual(a.settings, { temperature: 0.7, topP: 0.7, speed: 1, latency: 'normal', mp3Bitrate: 128, normalize: true, requests: 1, voicing: 'one voice' }, 'the record says exactly what was sent');
+    assert.deepEqual([t.body.latency, t.body.mp3_bitrate, t.body.normalize, t.body.prosody.speed], ['normal', 128, true, 1]);
+    assert.equal(a.mode, undefined, 'summaries carry no mode');
     assert.equal(t.body.format, 'mp3');
     assert.match(t.body.text, /\[nervous\]/);
     assert.ok(fs.existsSync(path.join(tmp, 'output', a.file)));
@@ -367,6 +535,86 @@ async function check(name, fn) {
     const js = await (await get('/app.js')).text();
     assert.match(js, /'Official'/);
     assert.match(js, /function loadOfficialVoices/);
+  });
+  // Pull one top-level function out of app.js (browser code) to test it directly, like narratorCredit below.
+  const appFn = (js, name) => {
+    const at = js.indexOf(`function ${name}(`);
+    assert.ok(at >= 0, `app.js defines ${name}`);
+    return new Function(`${js.slice(at, js.indexOf('\n}\n', at) + 2)}; return ${name};`)();
+  };
+  await check('tabs: Audio Summary and Podcast, each with its own system prompt', async () => {
+    const html = await (await get('/')).text();
+    assert.match(html, /id="tabSummary"[^>]*>Audio Summary/);
+    assert.match(html, /id="tabPodcast"[^>]*>Podcast/);
+    assert.match(html, /id="systemPrompt"[^>]*data-mode-only="summary"|data-mode-only="summary"[^>]*id="systemPrompt"/);
+    assert.match(html, /id="podcastPrompt"/);
+  });
+  await check('tabs: switching keeps each tab its own draft', async () => {
+    const swapDraft = appFn(await (await get('/app.js')).text(), 'swapDraft');
+    const drafts = { summary: { brief: 'S', script: 's1', engine: 's1' }, podcast: { brief: 'P', script: '', engine: 's2.1-pro-free' } };
+    const out = swapDraft(drafts, 'summary', 'podcast', { brief: 'S edited', script: 's2', engine: 's1' });
+    assert.equal(out.load.brief, 'P');
+    assert.equal(out.drafts.summary.brief, 'S edited');
+    assert.equal(out.drafts.summary.engine, 's1', 'engine choice kept per tab');
+    assert.equal(drafts.summary.brief, 'S', 'input not mutated');
+    const back = swapDraft(out.drafts, 'podcast', 'summary', { brief: 'P2', script: 'p', engine: 'drama-3' });
+    assert.equal(back.load.script, 's2');
+    assert.equal(back.drafts.podcast.engine, 'drama-3');
+  });
+  await check('tabs: Audio Summary requests carry no podcast fields', async () => {
+    const js = await (await get('/app.js')).text();
+    const narrative = appFn(js, 'buildNarrativeBody')('summary', { system: 'S', instructions: 'I', minutes: 5, hosts: HOSTS });
+    assert.deepEqual(narrative, { system: 'S', instructions: 'I', minutes: 5 });
+    const revise = appFn(js, 'buildNarrativeBody')('summary', { system: 'S', instructions: 'I', minutes: 5, feedback: 'more', title: 'T', script: 'X' });
+    assert.deepEqual(revise, { system: 'S', instructions: 'I', minutes: 5, feedback: 'more', previous: { title: 'T', script: 'X' } });
+    const audio = appFn(js, 'buildAudioBody')('summary', { title: 'T', script: 'X', engine: 's1', speed: 1, voice: { id: 'v', title: 'V', author: 'A' }, hosts: {}, source: 'x' });
+    assert.deepEqual(audio, { title: 'T', script: 'X', engine: 's1', voiceId: 'v', voiceTitle: 'V', voiceAuthor: 'A', speed: 1 });
+  });
+  await check('tabs: overlapping requests keep everything locked; a late script goes to its own tab', async () => {
+    const js = await (await get('/app.js')).text();
+    const lock = js.slice(js.indexOf('function setBusyState'), js.indexOf('\n}\n', js.indexOf('function setBusyState')));
+    for (const id of ['#approveBtn', '#writeBtn', '#reviseBtn', '#redoBtn', '#tabSummary', '#tabPodcast']) assert.ok(lock.includes(id), `locks ${id}`);
+    assert.match(lock, /state\.busy \+= busy \? 1 : -1/, 'a counter, not a flag');
+    const write = js.slice(js.indexOf('async function writeNarrative'));
+    assert.match(write, /if \(state\.mode !== mode\)/, 'result stored in the starting tab\'s draft');
+    assert.ok(!/\.forEach\(\(b\) => \(b\.disabled = false\)\)/.test(write.slice(0, write.indexOf('\n}\n'))), 'no unconditional re-enable');
+  });
+  await check('tabs: the library lists the active tab, but covers are embedded for every episode', async () => {
+    const js = await (await get('/app.js')).text();
+    const lib = js.slice(js.indexOf('async function refreshLibrary'));
+    assert.match(lib, /embedMissingCovers\(eps\)/);
+    assert.match(lib, /\(ep\.mode \|\| 'summary'\) === state\.mode/);
+    assert.match(js, /function switchMode/);
+  });
+  await check('podcast tab: host names, story picker and host voices', async () => {
+    const html = await (await get('/')).text();
+    for (const id of ['hostMaleName', 'hostFemaleName', 'startFromEpisode', 'hostCards']) assert.match(html, new RegExp(`id="${id}"`), id);
+    const js = await (await get('/app.js')).text();
+    const h = { male: { name: 'Adrian', voice: { id: MALE_ID, title: 'Adrian', author: 'Fish Official' } }, female: { name: 'Maya', voice: { id: SARAH_ID, title: 'Sarah', author: 'Fish Official' } } };
+    const audio = appFn(js, 'buildAudioBody')('podcast', { title: 'T', script: 'X', engine: 's2.1-pro-free', speed: 1, voice: { id: 'v' }, hosts: h, source: 'The story.' });
+    assert.deepEqual(audio, { mode: 'podcast', title: 'T', script: 'X', engine: 's2.1-pro-free', speed: 1, source: 'The story.', speakers: [
+      { name: 'Adrian', voiceId: MALE_ID, voiceTitle: 'Adrian', voiceAuthor: 'Fish Official' },
+      { name: 'Maya', voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: 'Fish Official' },
+    ] });
+    const narrative = appFn(js, 'buildNarrativeBody')('podcast', { system: 'S', instructions: 'I', minutes: 3, hosts: { male: 'Adrian', female: 'Maya' } });
+    assert.deepEqual(narrative, { system: 'S', instructions: 'I', minutes: 3, mode: 'podcast', hosts: { male: 'Adrian', female: 'Maya' } });
+  });
+  await check('podcast tab: renaming a host rewrites the script labels, nothing else', async () => {
+    const renameLabels = appFn(await (await get('/app.js')).text(), 'renameLabels');
+    assert.equal(renameLabels('Sarah: Hi.\n\nAdrian: Sarah: is me.\n\n**sarah:** Bye.', 'Sarah', 'Maya'), 'Maya: Hi.\n\nAdrian: Sarah: is me.\n\n**Maya:** Bye.');
+    assert.equal(renameLabels('Al.ex: Hi.', 'Al.ex', 'Bo'), 'Bo: Hi.', 'dots in a name are literal');
+  });
+  await check('footnote: the engine and the settings it was voiced with', async () => {
+    const settingsLine = appFn(await (await get('/app.js')).text(), 'settingsLine');
+    const labels = { 's2.1-pro-free': 'S2.1 Pro · free tier', 'drama-3': 'Drama 3' };
+    assert.equal(settingsLine({ engine: 's2.1-pro-free', settings: { temperature: 0.9, topP: 0.9, speed: 1, latency: 'normal', mp3Bitrate: 128, normalize: true, requests: 5, voicing: 'both voices per request' } }, labels),
+      'Engine S2.1 Pro · free tier (s2.1-pro-free) · temperature 0.9 · top-p 0.9 · speed 1.00× · latency normal · MP3 128 kbps · 5 requests, both voices per request');
+    assert.equal(settingsLine({ engine: 'drama-3', settings: { temperature: 1, topP: 0.9, speed: 1.1, latency: 'normal', mp3Bitrate: 128, normalize: true, requests: 1, voicing: 'one voice' } }, labels),
+      'Engine Drama 3 (drama-3) · temperature 1.0 · top-p 0.9 · speed 1.10× · latency normal · MP3 128 kbps · 1 request');
+    assert.equal(settingsLine({ engine: 'mystery' }, labels), 'Engine mystery');
+  });
+  await check('podcast transcript says which speaker marker is which host', async () => {
+    assert.match(await (await get('/app.js')).text(), /Speaker \$\{i\} is \$\{s\.name\}/);
   });
   await check('library shows a Transcript button only when a transcript was saved', async () => {
     const html = await (await get('/')).text();
@@ -449,6 +697,32 @@ async function check(name, fn) {
     assert.equal(probe.format.tags.lyrics, expected, 'm4a carries the lyrics (©lyr)');
     await post('/api/delete', { file: a.file });
   });
+  await check('podcast files: the tag credits both hosts and the lyrics name the speakers', async () => {
+    const script = 'Adrian: [amused] Welcome back, everyone!\n\nSarah: Hi! Today, a skydive.\n\nAdrian: You hate heights.\n\nSarah: [teasing] I do not.\n\nAdrian: Okay. Let us begin.\n\nSarah: Goodbye for now!';
+    const a = await (await post('/api/audio', { mode: 'podcast', title: 'Pod Credits', script, engine: 's2.1-pro-free', speakers: SPEAKERS })).json();
+    const mp3 = path.join(tmp, 'output', a.file);
+    assert.equal((await post('/api/cover', { file: a.file, png: PNG_1PX })).status, 200);
+    const { frames } = readId3(fs.readFileSync(mp3));
+    assert.equal(id3Text(frames.TPE1), 'Adrian & Sarah');
+    const lyrics = frames.USLT.subarray(10).toString('utf16le');
+    assert.ok(lyrics.startsWith('Adrian: Welcome back, everyone!\n\nSarah: Hi! Today, a skydive.'), lyrics.slice(0, 80));
+    assert.ok(!lyrics.includes('<|speaker') && !lyrics.includes('[amused]'));
+    const eps = (await (await get('/api/episodes')).json()).episodes;
+    assert.equal(eps.find((e) => e.file === a.file).mode, 'podcast');
+    assert.ok(eps.filter((e) => !e.speakers).every((e) => e.mode === 'summary'), 'summaries listed as summary');
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) return console.log('    (.m4a part skipped: ffmpeg not installed)');
+    const real = path.join(tmp, 'pod-fixture.mp3');
+    assert.equal(spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=2', '-c:a', 'libmp3lame', '-b:a', '64k', real]).status, 0);
+    fs.copyFileSync(real, mp3);
+    assert.equal((await post('/api/cover', { file: a.file, png: PNG_1PX })).status, 200);
+    const r = await get(`/audio/${a.file.replace(/\.mp3$/, '.m4a')}?download=1`);
+    assert.equal(r.status, 200);
+    await r.arrayBuffer();
+    const probe = JSON.parse(String(spawnSync('ffprobe', ['-v', 'error', '-of', 'json', '-show_format', mp3.replace(/\.mp3$/, '.m4a')]).stdout));
+    assert.match(probe.format.tags.lyrics, /^Adrian: Welcome back/);
+    assert.equal(probe.format.tags.artist, 'Adrian & Sarah');
+    await post('/api/delete', { file: a.file });
+  });
   await check('the page renders and uploads covers for episodes that need them', async () => {
     const js = await (await get('/app.js')).text();
     assert.match(js, /\/api\/cover/);
@@ -462,6 +736,132 @@ async function check(name, fn) {
     const js = await (await get('/app.js')).text();
     assert.match(js, /ep\.artUrl/);
     assert.match(js, /\/api\/illustrate/);
+  });
+  await check('podcast audio: both voices per request, markers in order, transcript exact', async () => {
+    calls.tts.length = 0;
+    const script = podcastScript(6);
+    const r = await post('/api/audio', { mode: 'podcast', title: 'Pod One', script, engine: 's2.1-pro-free', speakers: SPEAKERS, source: 'The ledge is cold.' });
+    const a = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(a));
+    assert.equal(calls.tts.length, 1, 'a short episode fits one window');
+    const t = calls.tts[0].body;
+    assert.deepEqual(t.reference_id, [MALE_ID, SARAH_ID]);
+    const { turns } = pod().parseTurns(script, HOSTS);
+    assert.equal(t.text, pod().fishDialogueText(turns).replace(/[ \t]{2,}/g, (m) => m), 'dialogue text');
+    assert.ok(t.text.startsWith('<|speaker:0|>[amused]') && t.text.includes('<|speaker:1|>'));
+    assert.equal(fs.readFileSync(path.join(tmp, 'output', a.transcript), 'utf8'), t.text, 'saved transcript is what Fish got');
+    assert.equal(a.mode, 'podcast');
+    assert.equal(a.speakers[1].name, 'Sarah');
+    assert.equal(a.voiceId, null);
+    assert.equal(a.source, 'The ledge is cold.');
+  });
+  await check('podcast audio: a long episode is voiced in windows of whole turns, in order', async () => {
+    calls.tts.length = 0;
+    calls.retried = false;
+    const script = podcastScript(40, 12).replace('Turn 7', 'Turn 7 RETRY429');
+    const r = await post('/api/audio', { mode: 'podcast', title: 'Pod Long', script, engine: 's2.1-pro-free', speakers: SPEAKERS });
+    const a = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(a));
+    const windows = calls.tts.filter((c) => Array.isArray(c.body.reference_id));
+    assert.ok(windows.length > 3, `several windows (${windows.length})`);
+    assert.ok(calls.retried, 'a 429 was retried');
+    const sent = [...new Set(windows.map((w) => w.body.text))];
+    for (const w of sent) {
+      assert.ok(w.startsWith('<|speaker:') && w.length <= 700, 'whole turns, at most 700 chars');
+    }
+    assert.equal(a.chunks, sent.length);
+    const saved = fs.readFileSync(path.join(tmp, 'output', a.transcript), 'utf8');
+    assert.equal(saved, sent.sort((x, y) => saved.indexOf(x) - saved.indexOf(y)).join('\n\n'), 'transcript = windows joined');
+    const audio = fs.readFileSync(path.join(tmp, 'output', a.file)).toString('latin1');
+    const order = [...audio.matchAll(/WIN\[(.{24})\]/g)].map((m) => m[1]);
+    assert.deepEqual(order, sent.map((w) => w.slice(0, 24)), 'audio joined in script order');
+  });
+  await check('podcast audio: refused when it cannot be voiced right', async () => {
+    calls.tts.length = 0;
+    const body = { mode: 'podcast', title: 'Bad', script: podcastScript(6), engine: 's2.1-pro-free', speakers: SPEAKERS };
+    let r = await post('/api/audio', { ...body, speakers: [SPEAKERS[0], { ...SPEAKERS[1], voiceId: '' }] });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error, /voice/i);
+    r = await post('/api/audio', { ...body, script: podcastScript(6) + '\n\nNarrator: The end.' });
+    assert.equal(r.status, 400);
+    const msg = (await r.json()).error;
+    assert.match(msg, /Narrator/);
+    assert.match(msg, /Adrian/);
+    assert.equal(calls.tts.length, 0, 'nothing sent to Fish');
+  });
+  await check('podcast audio: S2 engines voice both hosts per request with expressive settings', async () => {
+    calls.tts.length = 0;
+    await post('/api/audio', { mode: 'podcast', title: 'Pod Settings', script: podcastScript(6), engine: 's2.1-pro', speakers: SPEAKERS });
+    const t = calls.tts.at(-1).body;
+    assert.ok(Array.isArray(t.reference_id));
+    assert.equal(t.temperature, 0.9);
+    assert.equal(t.top_p, 0.9);
+    const ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.title === 'Pod Settings');
+    assert.deepEqual(ep.settings, { temperature: 0.9, topP: 0.9, speed: 1, latency: 'normal', mp3Bitrate: 128, normalize: true, requests: 1, voicing: 'both voices per request' });
+  });
+  await check('podcast audio: Drama 3 and S1 voice one turn per request, each with its host\'s voice', async () => {
+    for (const engine of ['drama-3', 's1']) {
+      calls.tts.length = 0;
+      const script = podcastScript(6);
+      const r = await post('/api/audio', { mode: 'podcast', title: `Pod ${engine}`, script, engine, speakers: SPEAKERS });
+      const a = await r.json();
+      assert.equal(r.status, 200, JSON.stringify(a));
+      assert.equal(calls.tts.length, 6, `${engine}: one request per turn`);
+      // Requests run three at a time, so they may arrive out of order: identify each one's turn by its text.
+      const seen = calls.tts.map((c) => {
+        assert.equal(c.model, engine);
+        assert.ok(!c.body.text.includes('<|speaker'), 'no speaker markers in a single-voice request');
+        const i = Number(c.body.text.match(/Turn (\d+) /)[1]);
+        assert.equal(c.body.reference_id, i % 2 ? SARAH_ID : MALE_ID, `${engine}: turn ${i} uses its host's voice`);
+        return i;
+      });
+      assert.deepEqual(seen.sort((x, y) => x - y), [0, 1, 2, 3, 4, 5], 'every turn voiced once');
+      if (engine === 'drama-3') assert.deepEqual([calls.tts[0].body.temperature, calls.tts[0].body.top_p], [1, 0.9]);
+      assert.equal(a.settings.voicing, 'one line per request');
+      assert.equal(a.settings.requests, 6);
+      assert.equal(a.settings.temperature, calls.tts[0].body.temperature);
+      if (engine === 's1') assert.ok(calls.tts.every((c) => !c.body.text.includes('[')), 'S1 gets (parenthesis) tags');
+      const saved = fs.readFileSync(path.join(tmp, 'output', a.transcript), 'utf8');
+      assert.ok(saved.startsWith('<|speaker:0|>') && saved.includes('<|speaker:1|>'), 'transcript records who voiced each line');
+      assert.equal(a.chunks, 6);
+    }
+  });
+  await check('podcast audio: after a window fails, no more windows are sent', async () => {
+    calls.tts.length = 0;
+    const script = podcastScript(90, 12).replace('Turn 0', 'Turn 0 FAILHERE');
+    const r = await post('/api/audio', { mode: 'podcast', title: 'Pod Fail', script, engine: 's2.1-pro-free', speakers: SPEAKERS });
+    assert.notEqual(r.status, 200);
+    const windows = pod().chunkDialogue(pod().parseTurns(script, HOSTS).turns).length;
+    await new Promise((res) => setTimeout(res, 200)); // let any stray worker show itself
+    const sent = calls.tts.filter((c) => Array.isArray(c.body.reference_id)).length;
+    assert.ok(windows > 6 && sent <= 3, `stopped early: ${sent} of ${windows} windows sent`);
+  });
+  await check('podcast audio: redrawing a podcast illustration says it is a conversation', async () => {
+    const a = await (await post('/api/audio', { mode: 'podcast', title: 'Pod Redraw', script: podcastScript(6), engine: 's2.1-pro-free', speakers: SPEAKERS })).json();
+    calls.art.length = 0;
+    assert.equal((await post('/api/illustrate', { file: a.file })).status, 200);
+    assert.match(calls.art.at(-1).messages[0].content, /not the hosts/);
+  });
+  await check('podcast audio: a server whose default engine is S1 still voices podcasts', async () => {
+    const s1 = await startServer({ FISH_MODEL: 's1', FISH_AUDIO_API_KEY: 'fish-test-0123456789' });
+    try {
+      const at = `http://127.0.0.1:${s1.port}`;
+      const c = await (await fetch(`${at}/api/config`)).json();
+      assert.equal(c.defaultEngine, 's1');
+      assert.equal(c.podcast.defaultEngine, 's2.1-pro-free');
+      const r = await fetch(`${at}/api/audio`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'podcast', title: 'S1 default', script: podcastScript(6), speakers: SPEAKERS }) });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal((await r.json()).engine, 's2.1-pro-free');
+    } finally {
+      s1.proc.kill();
+    }
+  });
+  await check('podcast audio: the illustrator is told it is a conversation about the story', async () => {
+    calls.art.length = 0;
+    await post('/api/audio', { mode: 'podcast', title: 'Pod Art', script: podcastScript(6), engine: 's2.1-pro-free', speakers: SPEAKERS });
+    const content = calls.art.at(-1).messages[0].content;
+    assert.match(content, /conversation/);
+    assert.match(content, /not the hosts/);
   });
   await check('audio: s1 converts to (parentheses) and drops unknown tags', async () => {
     const r = await post('/api/audio', { title: 't', script: '[nervous, hushed] Hello there friend. [long-break] [voice tightening] Again.', engine: 's1' });
@@ -505,6 +905,15 @@ async function check(name, fn) {
     assert.equal((await get('/audio/..%2Fserver.js')).status, 404);
     assert.equal((await get('/audio/..%2F..%2Fetc%2Fpasswd.mp3')).status, 404);
   });
+  await check('episodes made before settings were recorded show the settings every request used then', async () => {
+    const out = path.join(tmp, 'output');
+    fs.copyFileSync(path.join(samplesDir, 'sample-one.mp3'), path.join(out, 'legacy.mp3'));
+    fs.writeFileSync(path.join(out, 'legacy.json'), JSON.stringify({ file: 'legacy.mp3', title: 'Legacy', createdAt: '2026-10-24T12:00:00.000Z', engine: 's2.1-pro-free', speed: 1.1, chunks: 1, script: 'x' }));
+    const ep = (await (await get('/api/episodes')).json()).episodes.find((e) => e.file === 'legacy.mp3');
+    assert.deepEqual(ep.settings, { temperature: 0.7, topP: 0.7, speed: 1.1, latency: 'normal', mp3Bitrate: 128, normalize: true, requests: 1, voicing: 'one voice' });
+    fs.unlinkSync(path.join(out, 'legacy.mp3'));
+    fs.unlinkSync(path.join(out, 'legacy.json'));
+  });
   await check('library lists saved episodes', async () => {
     const { episodes } = await (await get('/api/episodes')).json();
     assert.ok(episodes.length >= 2);
@@ -535,6 +944,12 @@ async function check(name, fn) {
       `Narrated by Sarah (voice by Fish Official, ID ${SARAH_ID})`);
     assert.equal(narratorCredit({ voiceId: SARAH_ID, voiceTitle: 'Sarah', voiceAuthor: null }), `Narrated by Sarah (ID ${SARAH_ID})`);
     assert.equal(narratorCredit({ voiceId: null, voiceTitle: 'Engine voice' }), 'Narrated by the engine’s own voice');
+    const pods = (names, titles) => ({ mode: 'podcast', speakers: [
+      { name: names[0], voiceId: VOICE_ID, voiceTitle: titles[0], voiceAuthor: 'Fish Official' },
+      { name: names[1], voiceId: SARAH_ID, voiceTitle: titles[1], voiceAuthor: 'Fish Official' },
+    ] });
+    assert.equal(narratorCredit(pods(['Adrian', 'Sarah'], ['Adrian', 'Sarah'])), `Hosted by Adrian and Sarah (voices by Fish Official, IDs ${VOICE_ID} and ${SARAH_ID})`);
+    assert.equal(narratorCredit(pods(['Adrian', 'Maya'], ['Adrian', 'Sarah'])), `Hosted by Adrian (voice by Fish Official, ID ${VOICE_ID}) and Maya (voice “Sarah” by Fish Official, ID ${SARAH_ID})`);
     assert.equal(narratorCredit({ voiceId: null, voiceTitle: 'Default voice' }), 'Narrated by the engine’s own voice');
     assert.ok(!/ by .* by /.test(narratorCredit({ voiceId: VOICE_ID, voiceTitle: 'Narrator', voiceAuthor: 'Rogen Darell Aban' })));
   });
@@ -542,7 +957,8 @@ async function check(name, fn) {
     const js = await (await get('/app.js')).text();
     assert.match(js, /ID \$\{ep\.voiceId\}/, 'voice ID shown in the credit');
     assert.match(js, /\/api\/delete/);
-    assert.match(js, /voiceAuthor: state\.voice\.author/);
+    assert.match(js, /voice: state\.voice,/);
+    assert.match(js, /voiceAuthor: f\.voice\.author/);
     assert.match(js, /function narratorCredit/);
     assert.ok((js.match(/narratorCredit\(ep\)/g) || []).length >= 2, 'used in both library and player');
   });
@@ -598,12 +1014,7 @@ async function check(name, fn) {
     const out = path.join(tmp, 'output');
     fs.mkdirSync(out, { recursive: true });
     fs.writeFileSync(path.join(out, 'nocache.mp3'), Buffer.concat([Buffer.from('ID3'), Buffer.alloc(4000, 7)]));
-    const port2 = port + 100;
-    const c2 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-      env: { PATH: process.env.PATH, PORT: String(port2), OUTPUT_DIR: out, ENV_FILE: envFile, ANTHROPIC_BASE_URL: up, FISH_BASE_URL: up, ANTHROPIC_API_KEY: '', FISH_AUDIO_API_KEY: '', FFMPEG_PATH: '/no/such/ffmpeg' },
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-    await new Promise((resolve, reject) => { c2.stdout.on('data', (d) => /running at/.test(String(d)) && resolve()); c2.on('exit', reject); });
+    const { proc: c2, port: port2 } = await startServer({ FFMPEG_PATH: '/no/such/ffmpeg' });
     try {
       assert.equal((await (await fetch(`http://127.0.0.1:${port2}/api/config`)).json()).m4a, false);
       const r = await fetch(`http://127.0.0.1:${port2}/audio/nocache.m4a?download=1`);
@@ -616,8 +1027,10 @@ async function check(name, fn) {
     }
   });
 
-  child.kill();
+  for (const proc of servers) proc.kill();
   upstream.close();
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`\n${process.exitCode ? 'FAILED' : 'All'} ${pass} checks passed`);
+  // Open keep-alive sockets or a stray child must never keep the run alive.
+  process.exit(process.exitCode || 0);
 })();

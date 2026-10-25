@@ -21,8 +21,59 @@ const state = {
   voice: { id: '', title: 'Engine voice', author: null },
   defaultVoice: null, // Fish voice details for config.defaultVoiceId, once looked up
   current: null, // episode now loaded in the player
-  busy: false,
+  busy: 0, // requests in flight (write and voice can overlap)
+  mode: 'summary', // the active tab: 'summary' (Audio Summary) or 'podcast'
+  drafts: { summary: null, podcast: null }, // each tab's brief, length, title, script, engine, review state
+  hosts: null, // podcast hosts: { male: { name, voice }, female: { name, voice } }
+  voiceTarget: 'male', // on the Podcast tab, which host the voice list picks for
+  episodes: [], // every episode on disk; each tab lists its own kind
 };
+
+// ------------------------------------------------------------ pure helpers (tested from test/smoke.js)
+/** Store the outgoing tab's inputs and hand back the incoming tab's. */
+function swapDraft(drafts, from, to, current) {
+  const next = { ...drafts, [from]: { ...drafts[from], ...current } };
+  return { drafts: next, load: next[to] };
+}
+
+/** Rename a host's label at the start of lines only (mirrors podcast.js). */
+function renameLabels(script, oldName, newName) {
+  const esc = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|\\n)([ \\t]*[*_]{0,2}[ \\t]*)${esc}([ \\t]*[*_]{0,2}[ \\t]*:)`, 'gi');
+  return String(script).replace(re, (m, start, pre, post) => `${start}${pre}${newName}${post}`);
+}
+
+/** Footnote: the engine and the settings the episode was voiced with ("Engine Drama 3 (drama-3) · temperature 1.0 · …"). */
+function settingsLine(ep, labels) {
+  const engine = labels[ep.engine] ? `Engine ${labels[ep.engine]} (${ep.engine})` : `Engine ${ep.engine}`;
+  const s = ep.settings;
+  if (!s) return engine;
+  const requests = `${s.requests} request${s.requests === 1 ? '' : 's'}${s.voicing && s.voicing !== 'one voice' ? `, ${s.voicing}` : ''}`;
+  return [engine, `temperature ${Number(s.temperature).toFixed(1)}`, `top-p ${Number(s.topP).toFixed(1)}`, `speed ${Number(s.speed).toFixed(2)}×`, `latency ${s.latency}`, `MP3 ${s.mp3Bitrate} kbps`, requests].join(' · ');
+}
+
+/** The /api/narrative body. Audio Summary bodies are exactly what they were before podcasts existed. */
+function buildNarrativeBody(mode, f) {
+  const body = { system: f.system, instructions: f.instructions, minutes: f.minutes };
+  if (mode === 'podcast') {
+    body.mode = 'podcast';
+    body.hosts = { male: f.hosts.male, female: f.hosts.female };
+  }
+  if (f.feedback) {
+    body.feedback = f.feedback;
+    body.previous = { title: f.title, script: f.script };
+  }
+  return body;
+}
+
+/** The /api/audio body: one narrator voice for a summary, both hosts for a podcast. */
+function buildAudioBody(mode, f) {
+  if (mode !== 'podcast') {
+    return { title: f.title, script: f.script, engine: f.engine, voiceId: f.voice.id, voiceTitle: f.voice.title, voiceAuthor: f.voice.author, speed: f.speed };
+  }
+  const speaker = (h) => ({ name: h.name, voiceId: h.voice.id, voiceTitle: h.voice.title, voiceAuthor: h.voice.author });
+  return { mode: 'podcast', title: f.title, script: f.script, engine: f.engine, speed: f.speed, source: f.source, speakers: [speaker(f.hosts.male), speaker(f.hosts.female)] };
+}
 
 // ------------------------------------------------------------ helpers
 async function api(path, opts = {}) {
@@ -182,8 +233,11 @@ function fillSystemPrompt() {
 function renderRules() {
   if (!state.config) return;
   const minutes = Number($('#minutes').value);
-  $('#promptRules').textContent = state.config.promptRules
-    .replaceAll('{{words}}', String(Math.round(minutes * 135)))
+  const podcast = state.mode === 'podcast';
+  let rules = podcast ? state.config.podcast.rules : state.config.promptRules;
+  if (podcast && state.hosts) rules = rules.replaceAll('{{male}}', state.hosts.male.name).replaceAll('{{female}}', state.hosts.female.name);
+  $('#promptRules').textContent = rules
+    .replaceAll('{{words}}', String(Math.round(minutes * (podcast ? state.config.podcast.wpm : 135))))
     .replaceAll('{{minutes}}', String(minutes));
 }
 $('#systemPrompt').addEventListener('input', () => {
@@ -202,6 +256,150 @@ $('#resetSystemBtn').addEventListener('click', () => {
   }
 });
 
+// The podcast tab's system prompt has its own box, storage key and Reset.
+const PODCAST_PROMPT_KEY = 'podcastStudio.podcastPrompt';
+function fillPodcastPrompt() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(PODCAST_PROMPT_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  $('#podcastPrompt').value = saved || state.config.podcast.defaultPrompt;
+}
+$('#podcastPrompt').addEventListener('input', () => {
+  try {
+    localStorage.setItem(PODCAST_PROMPT_KEY, $('#podcastPrompt').value);
+  } catch {
+    /* storage unavailable */
+  }
+});
+$('#resetPodcastBtn').addEventListener('click', () => {
+  $('#podcastPrompt').value = state.config.podcast.defaultPrompt;
+  try {
+    localStorage.removeItem(PODCAST_PROMPT_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+});
+
+// ------------------------------------------------------------ podcast hosts and story
+function fillHosts() {
+  $('#hostMaleName').value = state.hosts.male.name;
+  $('#hostFemaleName').value = state.hosts.female.name;
+  renderHostCards();
+}
+
+/** Renaming a host renames their lines in the script; picking a voice never renames anyone. */
+function renameHost(slot, input) {
+  const other = slot === 'male' ? 'female' : 'male';
+  const name = input.value.trim();
+  const old = state.hosts[slot].name;
+  if (!/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(name) || name.toLowerCase() === state.hosts[other].name.toLowerCase()) {
+    notice('Host names need 1–24 letters or digits, and the two hosts need different names.');
+    input.value = old;
+    return;
+  }
+  if (name === old) return;
+  state.hosts[slot].name = name;
+  $('#script').value = renameLabels($('#script').value, old, name);
+  if (state.drafts.podcast) state.drafts.podcast.script = renameLabels(state.drafts.podcast.script || '', old, name);
+  renderRules();
+  renderHostCards();
+  refreshStats();
+  if (!$('#preview').hidden) renderPreview();
+}
+$('#hostMaleName').addEventListener('change', (e) => renameHost('male', e.target));
+$('#hostFemaleName').addEventListener('change', (e) => renameHost('female', e.target));
+
+/** "Start from an episode": the audio summaries, newest first; picking one puts its narration in the user prompt. */
+function renderStoryPicker() {
+  const sel = $('#startFromEpisode');
+  const keep = sel.value;
+  sel.replaceChildren(new Option('Choose an audio summary to use its story…', ''));
+  for (const ep of state.episodes.filter((e) => (e.mode || 'summary') === 'summary' && e.script)) sel.append(new Option(ep.title, ep.file));
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : '';
+}
+function useStory(file) {
+  const ep = state.episodes.find((e) => e.file === file);
+  if (ep) $('#instructions').value = stripTags(ep.script);
+}
+$('#startFromEpisode').addEventListener('change', (e) => e.target.value && useStory(e.target.value));
+
+// ------------------------------------------------------------ tabs: Audio Summary / Podcast
+const MODE_KEY = 'podcastStudio.mode';
+const WRITE_LABEL = { summary: 'Write the narrative', podcast: 'Write the podcast' };
+
+function draftInputs() {
+  return {
+    brief: $('#instructions').value,
+    minutes: Number($('#minutes').value),
+    title: $('#title').value,
+    script: $('#script').value,
+    reviewOpen: !$('#reviewPanel').hidden,
+    engine: $('#engine').value,
+  };
+}
+
+function loadDraft(d) {
+  $('#instructions').value = d.brief;
+  $('#minutes').value = String(d.minutes);
+  $('#minutesOut').textContent = `${d.minutes} min`;
+  $('#title').value = d.title;
+  $('#script').value = d.script;
+  $('#feedback').value = '';
+  $('#reviewPanel').hidden = !d.reviewOpen;
+  fillEngines(d.engine);
+  showTab('edit');
+  refreshStats();
+  setStep(d.reviewOpen ? 'review' : 'brief');
+}
+
+/** Switch tabs: keep the outgoing tab's draft, load the other's. Locked while a request runs. */
+function switchMode(mode, { initial = false } = {}) {
+  if (state.busy || (mode === state.mode && !initial)) return;
+  const out = swapDraft(state.drafts, state.mode, mode, draftInputs());
+  state.drafts = out.drafts;
+  state.mode = mode;
+  document.body.dataset.mode = mode;
+  $('#tabSummary').setAttribute('aria-selected', String(mode === 'summary'));
+  $('#tabPodcast').setAttribute('aria-selected', String(mode === 'podcast'));
+  $('#writeBtn').textContent = WRITE_LABEL[mode];
+  loadDraft(out.load);
+  $('#instructions').placeholder = mode === 'podcast' ? state.config.podcast.defaultBrief : '';
+  if (mode === 'podcast' && !$('#instructions').value.trim()) {
+    const newest = $('#startFromEpisode').options[1];
+    if (newest) {
+      $('#startFromEpisode').value = newest.value;
+      useStory(newest.value);
+    }
+  }
+  renderRules();
+  renderVoicePanel();
+  renderLibrary();
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** Count requests in flight; while any runs, the tabs and every action button stay locked. */
+function setBusyState(busy) {
+  state.busy += busy ? 1 : -1;
+  const locked = state.busy > 0;
+  for (const id of ['#tabSummary', '#tabPodcast', '#writeBtn', '#reviseBtn', '#redoBtn', '#approveBtn']) $(id).disabled = locked;
+}
+
+$('#tabSummary').addEventListener('click', () => switchMode('summary'));
+$('#tabPodcast').addEventListener('click', () => switchMode('podcast'));
+$('.modes').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const next = state.mode === 'summary' ? 'podcast' : 'summary';
+  switchMode(next);
+  $(next === 'podcast' ? '#tabPodcast' : '#tabSummary').focus();
+});
+
 function ensureKey(which) {
   if (!state.config.hasKeys[which]) {
     openKeys(false);
@@ -213,18 +411,27 @@ function ensureKey(which) {
 async function writeNarrative({ feedback } = {}) {
   if (!ensureKey('anthropic')) return;
   const btn = feedback ? $('#reviseBtn') : $('#writeBtn');
-  const body = {
-    system: $('#systemPrompt').value.trim(),
+  const mode = state.mode;
+  const body = buildNarrativeBody(mode, {
+    system: (mode === 'podcast' ? $('#podcastPrompt') : $('#systemPrompt')).value.trim(),
     instructions: $('#instructions').value.trim(),
     minutes: Number($('#minutes').value),
-  };
-  if (!body.instructions) return notice('Write a user prompt first: what the story is about.');
-  if (feedback) body.feedback = feedback, (body.previous = { title: $('#title').value, script: $('#script').value });
+    hosts: state.hosts && { male: state.hosts.male.name, female: state.hosts.female.name },
+    feedback,
+    title: $('#title').value,
+    script: $('#script').value,
+  });
+  if (!body.instructions) return notice(mode === 'podcast' ? 'Paste the story the hosts should talk about first.' : 'Write a user prompt first: what the story is about.');
   notice('');
-  setBusy(btn, true, feedback ? 'Revising…' : 'Writing… (up to a minute)');
-  [$('#writeBtn'), $('#reviseBtn'), $('#redoBtn')].forEach((b) => (b.disabled = true));
+  setBusy(btn, true, feedback ? 'Revising…' : mode === 'podcast' ? 'Writing… (up to a few minutes)' : 'Writing… (up to a minute)');
+  setBusyState(true);
   try {
     const n = await api('/api/narrative', { body });
+    if (state.mode !== mode) {
+      // The other tab is showing: keep the script with the tab that asked for it.
+      state.drafts[mode] = { ...state.drafts[mode], title: n.title, script: n.script, reviewOpen: true };
+      return;
+    }
     state.narrative = { title: n.title, script: n.script };
     $('#title').value = n.title;
     $('#script').value = n.script;
@@ -239,7 +446,7 @@ async function writeNarrative({ feedback } = {}) {
     notice(ex.message);
   } finally {
     setBusy(btn, false);
-    [$('#writeBtn'), $('#reviseBtn'), $('#redoBtn')].forEach((b) => (b.disabled = false));
+    setBusyState(false);
   }
 }
 
@@ -254,6 +461,14 @@ $('#feedback').addEventListener('keydown', (e) => e.key === 'Enter' && $('#revis
 
 // ------------------------------------------------------------ script editor + preview
 function refreshStats() {
+  if (state.mode === 'podcast' && state.hosts) {
+    const names = [state.hosts.male.name, state.hosts.female.name].map((n) => n.toLowerCase());
+    const paras = $('#script').value.split(/\n+/).filter((p) => p.trim());
+    const turns = paras.filter((p) => names.includes((p.match(/^\s*[*_]{0,2}\s*([^:*_]+?)\s*[*_]{0,2}\s*:/) || [])[1]?.toLowerCase())).length;
+    const words = stripTags(paras.map((p) => p.replace(/^[^:]{1,30}:\s*/, '')).join(' ')).split(/\s+/).filter(Boolean).length;
+    $('#stats').textContent = `${turns} turns · ${words} words · ~${fmtTime((words / state.config.podcast.wpm) * 60)}`;
+    return;
+  }
   const s = scriptStats($('#script').value);
   $('#stats').textContent = `${s.words} words · ~${fmtTime(s.seconds)} · ${s.tags} tags`;
 }
@@ -262,9 +477,23 @@ $('#script').addEventListener('input', refreshStats);
 function renderPreview() {
   const box = $('#preview');
   box.replaceChildren();
-  for (const para of $('#script').value.split(/\n\s*\n/)) {
+  const hosts = state.mode === 'podcast' && state.hosts ? [state.hosts.male.name, state.hosts.female.name] : null;
+  for (let para of $('#script').value.split(hosts ? /\n+/ : /\n\s*\n/)) {
     if (!para.trim()) continue;
     const p = document.createElement('p');
+    if (hosts) {
+      // Colour each turn by host, with the name in bold.
+      const m = para.match(/^\s*[*_]{0,2}\s*([^:*_]+?)\s*[*_]{0,2}\s*:\s*/);
+      const who = m ? hosts.findIndex((h) => h.toLowerCase() === m[1].toLowerCase()) : -1;
+      if (who >= 0) {
+        p.className = `turn ${who ? 'female' : 'male'}`;
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = `${hosts[who]}: `;
+        p.append(label);
+        para = para.slice(m[0].length);
+      }
+    }
     for (const part of para.split(/(\[[^\]]*\])/)) {
       if (!part) continue;
       if (/^\[[^\]]*\]$/.test(part)) {
@@ -292,20 +521,27 @@ $('#tabEdit').addEventListener('click', () => showTab('edit'));
 $('#tabPreview').addEventListener('click', () => showTab('preview'));
 
 // ------------------------------------------------------------ production settings
-function fillEngines() {
+function fillEngines(selected) {
   const sel = $('#engine');
   sel.replaceChildren();
-  for (const e of state.config.engines) {
+  // Podcasts need an engine that can voice two hosts (no S1).
+  const allowed = state.mode === 'podcast' ? state.config.podcast.engines : null;
+  for (const e of state.config.engines.filter((x) => !allowed || allowed.includes(x.id))) {
     const o = document.createElement('option');
     o.value = e.id;
     o.textContent = e.label;
     sel.append(o);
   }
-  sel.value = state.config.defaultEngine;
+  const fallback = allowed ? state.config.podcast.defaultEngine : state.config.defaultEngine;
+  sel.value = selected && [...sel.options].some((o) => o.value === selected) ? selected : fallback;
   updateEngineHint();
 }
+const engineLabels = () => Object.fromEntries((state.config?.engines || []).map((e) => [e.id, e.label]));
+
 function updateEngineHint() {
-  $('#engineHint').textContent = ENGINE_HINTS[$('#engine').value] || '';
+  const id = $('#engine').value;
+  const perLine = state.mode === 'podcast' && state.config && !['s2.1-pro-free', 's2.1-pro', 's2-pro'].includes(id);
+  $('#engineHint').textContent = `${ENGINE_HINTS[id] || ''}${perLine ? ' For podcasts, each host\'s lines are voiced one at a time with that host\'s voice.' : ''}`;
 }
 $('#engine').addEventListener('change', updateEngineHint);
 $('#speed').addEventListener('input', () => ($('#speedOut').textContent = `${Number($('#speed').value).toFixed(2)}×`));
@@ -313,10 +549,57 @@ $('#speed').addEventListener('input', () => ($('#speedOut').textContent = `${Num
 let sampleAudio = null;
 const voiceLabel = (v) => (v.author ? `${v.title} by ${v.author}` : v.title);
 
-function selectVoice(v) {
+/** The voice the list is picking right now: the narrator's, or the target host's on the Podcast tab. */
+const activeVoice = () => (state.mode === 'podcast' && state.hosts ? state.hosts[state.voiceTarget].voice : state.voice);
+
+function setNarrator(v) {
   state.voice = { id: v.id, title: v.title, author: v.author || null };
   $('#voiceCurrent').textContent = voiceLabel(state.voice);
-  $('#voiceList').querySelectorAll('li[data-id]').forEach((li) => li.classList.toggle('sel', li.dataset.id === state.voice.id));
+}
+
+function selectVoice(v) {
+  if (state.mode === 'podcast' && state.hosts) {
+    state.hosts[state.voiceTarget].voice = { id: v.id, title: v.title, author: v.author || null, tags: v.tags || [] };
+    renderHostCards();
+  } else {
+    setNarrator(v);
+  }
+  $('#voiceList').querySelectorAll('li[data-id]').forEach((li) => li.classList.toggle('sel', li.dataset.id === activeVoice().id));
+}
+
+/** One card per host: name, chosen voice, its gender tag when known, and "Choose voice". */
+function renderHostCards() {
+  const box = $('#hostCards');
+  if (!state.hosts) return;
+  box.replaceChildren();
+  for (const slot of ['male', 'female']) {
+    const h = state.hosts[slot];
+    const card = document.createElement('div');
+    card.className = `host-card${state.voiceTarget === slot ? ' active' : ''}`;
+    const who = document.createElement('div');
+    who.className = 'who';
+    const name = document.createElement('b');
+    name.textContent = `${h.name} · ${slot} host`;
+    const voice = document.createElement('span');
+    const gender = (h.voice.tags || []).find((t) => /^(male|female)$/i.test(t));
+    voice.textContent = `Voice: ${voiceLabel(h.voice)}${gender ? ` (${gender.toLowerCase()})` : ''}`;
+    who.append(name, voice);
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.className = state.voiceTarget === slot ? 'secondary small' : 'ghost small';
+    pick.textContent = state.voiceTarget === slot ? 'Choosing…' : 'Choose voice';
+    pick.addEventListener('click', () => {
+      state.voiceTarget = slot;
+      renderHostCards();
+      renderVoicePanel();
+      $('#voiceList').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+    card.append(who, pick);
+    box.append(card);
+  }
+  const same = state.hosts.male.voice.id === state.hosts.female.voice.id;
+  $('#hostsHint').hidden = !same;
+  $('#hostsHint').textContent = same ? 'Both hosts use the same voice, so listeners won\'t be able to tell them apart.' : '';
 }
 
 /** The default narrator and the engine's own voice are always listed first, then the search results. */
@@ -328,7 +611,7 @@ function renderVoices(items, { showEmpty = true, heading = '', more = null } = {
   const mk = (v, sub) => {
     const li = document.createElement('li');
     li.dataset.id = v.id;
-    li.className = state.voice.id === v.id ? 'sel' : '';
+    li.className = activeVoice().id === v.id ? 'sel' : '';
     const pick = document.createElement('button');
     pick.type = 'button';
     pick.className = 'vname';
@@ -373,11 +656,14 @@ function renderVoices(items, { showEmpty = true, heading = '', more = null } = {
   };
 
   const id = state.config.defaultVoiceId;
-  const def = state.defaultVoice || (id ? { id, title: 'Default narrator', author: null } : null);
+  const podcast = state.mode === 'podcast' && state.hosts;
+  // Pinned first: the default narrator and Engine voice on Audio Summary; the target host's current voice on Podcast.
+  const def = podcast ? { ...state.hosts[state.voiceTarget].voice } : state.defaultVoice || (id ? { id, title: 'Default narrator', author: null } : null);
   // The Official badge already names Fish Audio, so official voices skip the creator in their subtitle.
   const byline = (v) => (v.official ? null : v.author);
-  if (def) ul.append(mk(def, ['Default narrator', byline(def)].filter(Boolean).join(' · ')));
-  ul.append(mk({ id: '', title: 'Engine voice', author: null }, 'No reference voice: the engine picks one, and it can vary between runs'));
+  if (podcast) ul.append(mk(def, [`Current voice for ${state.hosts[state.voiceTarget].name}`, byline(def)].filter(Boolean).join(' · ')));
+  else if (def) ul.append(mk(def, ['Default narrator', byline(def)].filter(Boolean).join(' · ')));
+  if (!podcast) ul.append(mk({ id: '', title: 'Engine voice', author: null }, 'No reference voice: the engine picks one, and it can vary between runs'));
   if (heading) {
     const li = document.createElement('li');
     li.className = 'empty';
@@ -394,7 +680,7 @@ function renderVoices(items, { showEmpty = true, heading = '', more = null } = {
   if (items.length && !others.length) {
     const li = document.createElement('li');
     li.className = 'empty';
-    li.textContent = 'That is the default narrator, listed first above.';
+    li.textContent = podcast ? 'That voice is already listed first above.' : 'That is the default narrator, listed first above.';
     ul.append(li);
   }
   for (const v of others) ul.append(mk(v, [byline(v), ...(v.tags || [])].filter(Boolean).join(' · ')));
@@ -456,7 +742,12 @@ async function loadDefaultVoice() {
   } catch {
     /* keep the placeholder name */
   }
-  if (state.voice.id === id && state.defaultVoice) selectVoice(state.defaultVoice);
+  if (state.voice.id === id && state.defaultVoice) setNarrator(state.defaultVoice);
+  const view = state.voiceView || { items: [], opts: { showEmpty: false } };
+  renderVoices(view.items, view.opts);
+}
+/** Redraw the voice list for the active tab. */
+function renderVoicePanel() {
   const view = state.voiceView || { items: [], opts: { showEmpty: false } };
   renderVoices(view.items, view.opts);
 }
@@ -474,24 +765,28 @@ $('#approveBtn').addEventListener('click', async () => {
   const errEl = $('#audioError');
   notice('');
   errEl.hidden = true;
+  const mode = state.mode;
   setBusy(btn, true, 'Producing audio…');
+  setBusyState(true);
   $('#progress').hidden = false;
   setStep('produce');
   progressTimer = setInterval(() => {
     const s = Math.round((Date.now() - started) / 1000);
-    $('#progressText').textContent = `Fish Audio is voicing your story… ${fmtTime(s)} (a 5-minute piece can take a minute or two)`;
+    $('#progressText').textContent = mode === 'podcast'
+      ? `Fish Audio is voicing your hosts… ${fmtTime(s)} (a 5-minute episode can take a couple of minutes)`
+      : `Fish Audio is voicing your story… ${fmtTime(s)} (a 5-minute piece can take a minute or two)`;
   }, 1000);
   try {
     const ep = await api('/api/audio', {
-      body: {
+      body: buildAudioBody(mode, {
         title: $('#title').value.trim() || 'Untitled Episode',
         script,
         engine: $('#engine').value,
-        voiceId: state.voice.id,
-        voiceTitle: state.voice.title,
-        voiceAuthor: state.voice.author,
         speed: Number($('#speed').value),
-      },
+        voice: state.voice,
+        hosts: state.hosts,
+        source: $('#instructions').value.trim(),
+      }),
     });
     await embedCover(ep).catch((err) => console.warn('Cover not embedded:', err));
     loadEpisode(ep, true);
@@ -507,6 +802,7 @@ $('#approveBtn').addEventListener('click', async () => {
     clearInterval(progressTimer);
     $('#progress').hidden = true;
     setBusy(btn, false);
+    setBusyState(false);
   }
 });
 
@@ -521,6 +817,18 @@ const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
  * so then the creator is named as the narrator: "Narrated by Rogen Darell Aban ("Narrator" voice, ID 785e…)".
  */
 function narratorCredit(ep) {
+  if (ep.mode === 'podcast' && Array.isArray(ep.speakers)) {
+    // "Hosted by Adrian and Sarah (voices by Fish Official, IDs …)"; a host renamed away from their voice's name credits the voice.
+    const [a, b] = ep.speakers;
+    if (a.name === a.voiceTitle && b.name === b.voiceTitle && a.voiceAuthor && a.voiceAuthor === b.voiceAuthor) {
+      return `Hosted by ${a.name} and ${b.name} (voices by ${a.voiceAuthor}, IDs ${a.voiceId} and ${b.voiceId})`;
+    }
+    const one = (h) => {
+      const voice = h.name === h.voiceTitle ? 'voice' : `voice “${h.voiceTitle || 'custom'}”`;
+      return `${h.name} (${voice}${h.voiceAuthor ? ` by ${h.voiceAuthor}` : ''}, ID ${h.voiceId})`;
+    };
+    return `Hosted by ${one(a)} and ${one(b)}`;
+  }
   if (!ep.voiceId) return ep.voiceTitle ? 'Narrated by the engine’s own voice' : '';
   const title = String(ep.voiceTitle || '').trim();
   const generic = !title || /^(the )?(narrator|narration|voice|custom voice)$/i.test(title);
@@ -581,7 +889,8 @@ function loadEpisode(ep, autoplay) {
   $('#playerPanel').hidden = false;
   $('#playerH').textContent = ep.title;
   const when = ep.createdAt ? new Date(ep.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
-  $('#playerMeta').textContent = [when, `Engine ${ep.engine}`, narratorCredit(ep), `${ep.words} words`].filter(Boolean).join(' · ');
+  $('#playerMeta').textContent = [when, narratorCredit(ep), `${ep.words} words`].filter(Boolean).join(' · ');
+  $('#playerSettings').textContent = settingsLine(ep, engineLabels());
   audio.src = ep.url;
   audio.playbackRate = RATES[0];
   $('#rate').textContent = '1×';
@@ -742,7 +1051,8 @@ async function showTranscript(ep) {
     return notice('Could not load that transcript.');
   }
   $('#transcriptH').textContent = ep.title;
-  $('#transcriptMeta').textContent = `The exact text Fish Audio voiced, with its audio tags (engine ${ep.engine}${ep.chunks > 1 ? `, sent in ${ep.chunks} parts` : ''}).`;
+  const who = ep.mode === 'podcast' && Array.isArray(ep.speakers) ? ` ${ep.speakers.map((s, i) => `Speaker ${i} is ${s.name}`).join(', ')}.` : '';
+  $('#transcriptMeta').textContent = `The exact text Fish Audio voiced, with its audio tags (engine ${ep.engine}${ep.chunks > 1 ? `, sent in ${ep.chunks} parts` : ''}).${who}`;
   $('#transcriptText').textContent = text;
   $('#transcriptDownload').href = `${ep.transcriptUrl}?download=1`;
   $('#transcriptDownload').setAttribute('download', ep.transcript);
@@ -800,10 +1110,23 @@ async function refreshLibrary() {
   } catch {
     /* ignore */
   }
+  state.episodes = eps;
+  embedMissingCovers(eps); // every episode, whichever tab is showing
+  renderStoryPicker();
+  renderLibrary();
+}
+
+/** List the active tab's episodes; the tab labels show how many each has. */
+function renderLibrary() {
+  const all = state.episodes;
+  const count = (m) => all.filter((ep) => (ep.mode || 'summary') === m).length;
+  $('#countSummary').textContent = count('summary') ? `(${count('summary')})` : '';
+  $('#countPodcast').textContent = count('podcast') ? `(${count('podcast')})` : '';
+  const eps = all.filter((ep) => (ep.mode || 'summary') === state.mode);
+  $('#libH').textContent = state.mode === 'podcast' ? 'Your podcasts' : 'Your episodes';
   const ul = $('#episodes');
   ul.replaceChildren();
   $('#libraryPanel').hidden = eps.length === 0;
-  embedMissingCovers(eps);
   for (const ep of eps) {
     const li = document.createElement('li');
     li.dataset.file = ep.file;
@@ -820,7 +1143,6 @@ async function refreshLibrary() {
     s.className = 'esub';
     s.textContent = [
       new Date(ep.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }),
-      ep.engine,
       narratorCredit(ep),
       `${(ep.bytes / 1048576).toFixed(1)} MB`,
     ].filter(Boolean).join(' · ');
@@ -856,7 +1178,10 @@ async function refreshLibrary() {
       act.append(tr);
     }
     act.append(dl, dlPhone, del);
-    li.append(thumb, t, s, act);
+    const set = document.createElement('div');
+    set.className = 'esettings';
+    set.textContent = settingsLine(ep, engineLabels());
+    li.append(thumb, t, s, set, act);
     ul.append(li);
   }
 }
@@ -870,11 +1195,26 @@ async function refreshLibrary() {
   }
   fillEngines();
   fillSystemPrompt();
+  fillPodcastPrompt();
+  const d = state.config.podcast.hosts;
+  state.hosts = {
+    male: { name: d.male.name, voice: { id: d.male.voiceId, title: d.male.name, author: 'Fish Official' } },
+    female: { name: d.female.name, voice: { id: d.female.voiceId, title: d.female.name, author: 'Fish Official' } },
+  };
+  state.drafts.podcast = { brief: '', minutes: 5, title: '', script: '', reviewOpen: false, engine: state.config.podcast.defaultEngine };
+  fillHosts();
   const id = state.config.defaultVoiceId;
-  if (id) selectVoice({ id, title: 'Default narrator', author: null });
+  if (id) setNarrator({ id, title: 'Default narrator', author: null });
   renderVoices([], { showEmpty: false });
   loadDefaultVoice();
   await refreshLibrary();
+  let saved = null;
+  try {
+    saved = localStorage.getItem(MODE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  if (saved === 'podcast') switchMode('podcast');
   const has = state.config.hasKeys;
   if (!has.anthropic || !has.fish) openKeys(false);
 })();

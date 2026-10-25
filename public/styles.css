@@ -44,6 +44,27 @@ code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; background: 
 .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
 .brand-mark { width: 28px; height: 28px; color: var(--amber); }
 .brand-name { font: 600 1.25rem var(--serif); }
+/* ---------- mode tabs (Audio Summary / Podcast) */
+body[data-mode="summary"] [data-mode-only="podcast"],
+body[data-mode="podcast"] [data-mode-only="summary"] { display: none !important; }
+.modes { display: flex; gap: 6px; max-width: 1120px; margin: 22px auto 0; padding: 0 24px; }
+.modes button { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 8px 18px; font-weight: 600; }
+.modes button[aria-selected="true"] { background: var(--amber); color: var(--amber-ink); border-color: var(--amber); }
+.modes button:disabled { cursor: progress; opacity: 0.6; }
+.modes .count { font-weight: 400; opacity: 0.8; }
+.hosts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.hosts-row .field { margin: 0; }
+.field.stacked { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+.host-cards { display: grid; gap: 8px; margin-top: 6px; }
+.host-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.host-card.active { border-color: var(--amber); background: var(--amber-soft); }
+.host-card .who { flex: 1; min-width: 0; font-size: 0.86rem; }
+.host-card .who b { display: block; }
+.host-card .who span { color: var(--muted); font-size: 0.76rem; }
+.preview .turn .label { font-weight: 700; }
+.preview .turn.male .label { color: #8fb8ff; }
+.preview .turn.female .label { color: #f3a6c8; }
+@media (max-width: 560px) { .hosts-row { grid-template-columns: 1fr; } }
 .steps { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; font-size: 0.82rem; color: var(--muted); }
 .steps li { padding: 4px 12px; border-radius: 999px; border: 1px solid transparent; }
 .steps li.done { color: var(--text); }
@@ -167,12 +188,14 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .episodes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .episodes li { display: grid; grid-template-columns: 52px 1fr auto; gap: 4px 12px; align-items: center; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
 .episodes li.now { border-color: var(--amber); }
-.episodes .ethumb { grid-column: 1; grid-row: 1 / span 2; width: 52px; height: 52px; border-radius: 8px; object-fit: cover; border: 1px solid var(--line); }
+.episodes .ethumb { grid-column: 1; grid-row: 1 / span 3; width: 52px; height: 52px; border-radius: 8px; object-fit: cover; border: 1px solid var(--line); }
 .episodes .etitle { grid-column: 2; font: 600 1.02rem var(--serif); }
+.episodes .esettings { grid-column: 2; color: var(--muted); font-size: 0.74rem; opacity: 0.85; overflow-wrap: anywhere; }
+.meta.settings { font-size: 0.8rem; opacity: 0.85; margin-top: -4px; }
 .episodes .esub { grid-column: 2; color: var(--muted); font-size: 0.8rem; overflow-wrap: anywhere; }
 .danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 .danger.armed { color: var(--danger); border-color: var(--danger); background: transparent; }
-.episodes .eact { grid-column: 3; grid-row: 1 / span 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.episodes .eact { grid-column: 3; grid-row: 1 / span 3; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .episodes .eact button, .episodes .eact a { padding: 7px 12px; font-size: 0.82rem; }
 
 /* ---------- dialog */

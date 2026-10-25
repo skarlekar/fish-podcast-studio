@@ -8,7 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-mode="summary">
   <header class="top">
     <div class="brand">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M2 26 11 10l5 8 4-6 10 14z" fill="currentColor"/><circle cx="24" cy="8" r="3" fill="currentColor"/></svg>
@@ -25,24 +25,42 @@
 
   <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 
+  <nav class="modes" role="tablist" aria-label="What to make">
+    <button role="tab" id="tabSummary" type="button" aria-selected="true">Audio Summary <span class="count" id="countSummary"></span></button>
+    <button role="tab" id="tabPodcast" type="button" aria-selected="false">Podcast <span class="count" id="countPodcast"></span></button>
+  </nav>
+
   <main>
     <!-- 1. BRIEF -->
     <section class="panel" id="briefPanel" aria-labelledby="briefH">
       <div class="panel-head">
         <p class="eyebrow">Step 1</p>
         <h2 id="briefH">The brief</h2>
-        <p class="lede">Two prompts drive Claude. The system prompt sets the voice and craft; the user prompt is the story. Edit either one. Nothing is voiced until you approve the script.</p>
+        <p class="lede" data-mode-only="summary">Two prompts drive Claude. The system prompt sets the voice and craft; the user prompt is the story. Edit either one. Nothing is voiced until you approve the script.</p>
+        <p class="lede" data-mode-only="podcast">Turn a story into a two-host podcast: a male and a female host debate and banter their way through it, then leave the listener with takeaways and a question. The system prompt sets the show; the user prompt is the story. Nothing is voiced until you approve the script.</p>
       </div>
-      <div class="field-row">
+      <div class="field-row" data-mode-only="summary">
         <label class="field" for="systemPrompt">System prompt: how Claude writes</label>
         <button id="resetSystemBtn" class="ghost small" type="button" title="Restore the National Geographic-style default">Reset to default</button>
       </div>
-      <textarea id="systemPrompt" rows="12" spellcheck="true"></textarea>
+      <textarea id="systemPrompt" data-mode-only="summary" rows="12" spellcheck="true"></textarea>
+      <div class="field-row" data-mode-only="podcast">
+        <label class="field" for="podcastPrompt">System prompt: how the show is written</label>
+        <button id="resetPodcastBtn" class="ghost small" type="button" title="Restore the default podcast prompt">Reset to default</button>
+      </div>
+      <textarea id="podcastPrompt" data-mode-only="podcast" rows="14" spellcheck="true"></textarea>
+      <p class="hint" data-mode-only="podcast"><code>{{male}}</code> and <code>{{female}}</code> are replaced by the host names.</p>
       <details class="rules">
         <summary>Always added after your system prompt: length, audio tags, output format</summary>
         <pre id="promptRules"></pre>
       </details>
-      <label class="field" for="instructions">User prompt: what the story is about</label>
+      <div class="hosts-row" data-mode-only="podcast">
+        <label class="field stacked" for="hostMaleName">Male host<input id="hostMaleName" type="text" maxlength="24" autocomplete="off" spellcheck="false"></label>
+        <label class="field stacked" for="hostFemaleName">Female host<input id="hostFemaleName" type="text" maxlength="24" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label class="field" for="startFromEpisode" data-mode-only="podcast">Start from an episode</label>
+      <select id="startFromEpisode" data-mode-only="podcast"><option value="">Choose an audio summary to use its story…</option></select>
+      <label class="field" for="instructions"><span data-mode-only="summary">User prompt: what the story is about</span><span data-mode-only="podcast">User prompt: the story the hosts talk about</span></label>
       <textarea id="instructions" rows="9" spellcheck="true"></textarea>
       <div class="row between wrap">
         <label class="inline" for="minutes">
@@ -93,10 +111,13 @@
           <label class="field" for="speed">Speaking speed <output id="speedOut">1.00×</output></label>
           <input id="speed" type="range" min="0.7" max="1.3" step="0.05" value="1">
 
-          <div class="field-row">
+          <div class="field-row" data-mode-only="summary">
             <span class="field">Voice</span>
             <span class="voice-current" id="voiceCurrent">Default narrator</span>
           </div>
+          <span class="field" data-mode-only="podcast">Host voices</span>
+          <div id="hostCards" class="host-cards" data-mode-only="podcast"></div>
+          <p class="hint" id="hostsHint" data-mode-only="podcast" hidden></p>
           <div class="row">
             <input id="voiceQ" type="search" placeholder="Title, voice ID or link" aria-label="Search voices by title, or paste a voice ID or fish.audio link">
             <button id="voiceBtn" class="secondary" type="button">Find</button>
@@ -125,6 +146,7 @@
           <p class="eyebrow">Now playing</p>
           <h2 id="playerH">Episode</h2>
           <p class="meta" id="playerMeta"></p>
+          <p class="meta settings" id="playerSettings"></p>
 
           <audio id="audio" preload="metadata"></audio>
           <div class="transport">
